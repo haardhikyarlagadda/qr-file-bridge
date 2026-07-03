@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>QR File Bridge — optical file transfer</title>
+<meta name="description" content="Transfer files between any two devices using only a screen and a camera. No network, no cables, no accounts.">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#10141F">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+</head>
+<body data-mode="home">
+
+<header>
+  <div class="wordmark">
+    <span class="glyph" aria-hidden="true"></span>
+    <h1>QR&nbsp;File&nbsp;Bridge</h1>
+  </div>
+  <p class="tagline">screen&nbsp;→&nbsp;light&nbsp;→&nbsp;camera. nothing else.</p>
+</header>
+
+<main>
+
+  <!-- ── HOME ─────────────────────────────────────────────────────────── -->
+  <section id="panel-home" class="panel active">
+    <p class="lede">
+      Move a file between any two devices using only a screen and a camera.
+      The file is encrypted, cut into chunks, and played as an animated QR
+      sequence. No network protocol is used at any point — both devices can
+      be in airplane mode.
+    </p>
+    <div class="mode-choice">
+      <button id="btn-mode-send" class="mode-card send">
+        <span class="mode-kicker">this device has the file</span>
+        <span class="mode-title">Send</span>
+        <span class="mode-desc">Encrypt, chunk, and play the QR sequence on this screen.</span>
+      </button>
+      <button id="btn-mode-receive" class="mode-card receive">
+        <span class="mode-kicker">this device has the camera</span>
+        <span class="mode-title">Receive</span>
+        <span class="mode-desc">Scan the sender's screen and rebuild the file here.</span>
+      </button>
+    </div>
+    <details class="how">
+      <summary>How the optical channel works</summary>
+      <ol>
+        <li>Sender compresses the file, encrypts it with AES-256-GCM (key derived from your shared passphrase), and splits the ciphertext into chunks.</li>
+        <li>Each chunk becomes one QR frame; frame 0 is a manifest with the filename, frame count, and a SHA-256 digest.</li>
+        <li>The sender screen loops the frames as an animation; the receiver camera decodes them in any order.</li>
+        <li>The receiver can show an <em>ACK QR</em> listing missing frames — the sender scans it and replays only those.</li>
+        <li>Once complete, the receiver decrypts, verifies the SHA-256, and saves the file. A failed passphrase or a corrupted transfer saves nothing.</li>
+      </ol>
+    </details>
+  </section>
+
+  <!-- ── SEND ─────────────────────────────────────────────────────────── -->
+  <section id="panel-send" class="panel">
+    <button class="btn-back">← back</button>
+    <h2 class="role-title send">Send</h2>
+
+    <div id="send-setup">
+      <label class="file-drop">
+        <input type="file" id="send-file">
+        <span id="send-file-label">Choose a file</span>
+      </label>
+
+      <label class="field">
+        <span>Passphrase <em>(share it with the receiver out loud — never in a QR)</em></span>
+        <input type="password" id="send-pass" autocomplete="off" placeholder="e.g. correct-horse-battery">
+      </label>
+
+      <div class="field-row">
+        <label class="field">
+          <span>Chunk size</span>
+          <select id="send-chunk">
+            <option value="200">200 B — long distance / poor camera</option>
+            <option value="400" selected>400 B — balanced (default)</option>
+            <option value="800">800 B — good camera, close range</option>
+            <option value="1200">1200 B — ideal conditions only</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Frame rate</span>
+          <select id="send-fps">
+            <option value="1">1 fps — most reliable</option>
+            <option value="2" selected>2 fps — default</option>
+            <option value="4">4 fps — fast cameras</option>
+            <option value="6">6 fps — desktop webcams</option>
+          </select>
+        </label>
+      </div>
+
+      <button id="btn-prepare" class="btn-primary" disabled>Encrypt &amp; start transmitting</button>
+    </div>
+
+    <div id="send-live" class="hidden">
+      <div id="qr-stage" aria-label="Animated QR sequence"></div>
+      <div class="hud">
+        <span id="send-frame-label" class="mono">frame 0 / 0</span>
+        <span id="send-loop-label" class="mono">slot 0 of 0</span>
+      </div>
+      <div class="btn-row">
+        <button id="btn-pause" class="btn-ghost">Pause</button>
+        <button id="btn-scan-ack" class="btn-ghost">Scan receiver's ACK</button>
+        <button id="btn-full-loop" class="btn-ghost">Restart full loop</button>
+      </div>
+      <div id="ack-cam-wrap" class="cam-wrap hidden">
+        <video id="ack-video" playsinline muted></video>
+        <canvas id="ack-canvas" class="hidden"></canvas>
+        <p class="hint">Point this camera at the receiver's ACK QR.</p>
+      </div>
+    </div>
+
+    <p id="send-status" class="status" role="status"></p>
+  </section>
+
+  <!-- ── RECEIVE ──────────────────────────────────────────────────────── -->
+  <section id="panel-receive" class="panel">
+    <button class="btn-back">← back</button>
+    <h2 class="role-title receive">Receive</h2>
+
+    <label class="field">
+      <span>Passphrase <em>(the same one the sender used)</em></span>
+      <input type="password" id="recv-pass" autocomplete="off" placeholder="enter shared passphrase">
+    </label>
+    <button id="btn-start-scan" class="btn-primary">Open camera &amp; scan</button>
+
+    <div id="recv-live" class="hidden">
+      <div class="cam-wrap">
+        <video id="recv-video" playsinline muted></video>
+        <div class="viewfinder" aria-hidden="true"></div>
+        <canvas id="recv-canvas" class="hidden"></canvas>
+      </div>
+
+      <p id="recv-meta" class="mono meta"></p>
+
+      <div class="progress-row">
+        <div class="bar-track"><div id="recv-bar" class="bar-fill"></div></div>
+        <span id="recv-pct" class="mono">0%</span>
+        <span id="recv-count" class="mono">0 / ?</span>
+      </div>
+
+      <div id="frame-grid" aria-label="Received frame map"></div>
+
+      <div class="btn-row">
+        <button id="btn-show-ack" class="btn-ghost">Show ACK QR to sender</button>
+        <button id="btn-save" class="btn-primary" disabled>Decrypt &amp; save file</button>
+      </div>
+
+      <div id="ack-out-wrap" class="ack-out hidden">
+        <canvas id="ack-out"></canvas>
+        <p id="ack-out-label" class="hint"></p>
+      </div>
+    </div>
+
+    <p id="recv-status" class="status" role="status"></p>
+  </section>
+
+</main>
+
+<footer>
+  <p class="mono">AES-256-GCM · PBKDF2 · Base45 · CRC32 per frame · SHA-256 whole-file · zero sockets</p>
+</footer>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

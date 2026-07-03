@@ -1,0 +1,348 @@
+/* QR File Bridge — instrument-panel aesthetic.
+   Two roles, two signal colors: amber = sender (emits light),
+   cyan = receiver (captures light). The QR stage itself stays pure
+   white/black — the machine-readable surface is sacred. */
+
+:root {
+  --ink:        #10141F;
+  --panel:      #1A2130;
+  --panel-2:    #222B3E;
+  --line:       #2E3A52;
+  --text:       #E8ECF4;
+  --text-dim:   #8B96AB;
+  --amber:      #FFB224;   /* sender signal */
+  --cyan:       #4AD6E0;   /* receiver signal */
+  --ok:         #5CD879;
+  --err:        #FF6B6B;
+  --radius:     10px;
+  --font-disp:  "Space Grotesk", system-ui, sans-serif;
+  --font-mono:  "IBM Plex Mono", ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
+
+body {
+  background:
+    radial-gradient(1200px 500px at 70% -10%, #1C2740 0%, transparent 60%),
+    var(--ink);
+  color: var(--text);
+  font-family: var(--font-disp);
+  font-size: 16px;
+  line-height: 1.55;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+
+header {
+  padding: 28px 20px 8px;
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.wordmark { display: flex; align-items: center; gap: 12px; }
+
+/* the glyph: a 3×3 finder-pattern nod, one cell lit per active role */
+.glyph {
+  width: 30px; height: 30px; flex: none;
+  background:
+    conic-gradient(from 0deg, transparent 0 100%),
+    repeating-linear-gradient(0deg, var(--line) 0 8px, transparent 8px 11px),
+    repeating-linear-gradient(90deg, var(--line) 0 8px, transparent 8px 11px);
+  border: 2px solid var(--text);
+  border-radius: 6px;
+  position: relative;
+}
+.glyph::after {
+  content: ""; position: absolute; inset: 8px;
+  background: var(--text-dim); border-radius: 2px;
+  transition: background .3s;
+}
+body[data-mode="send"] .glyph::after    { background: var(--amber); }
+body[data-mode="receive"] .glyph::after { background: var(--cyan); }
+
+h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.01em; }
+
+.tagline {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin: 6px 0 0 42px;
+}
+
+/* ── Layout ─────────────────────────────────────────────────────────── */
+
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.panel { display: none; }
+.panel.active { display: block; animation: rise .25s ease-out; }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel.active { animation: none; }
+}
+
+.lede { color: var(--text-dim); margin-bottom: 28px; max-width: 56ch; }
+
+/* ── Mode cards ─────────────────────────────────────────────────────── */
+
+.mode-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 560px) { .mode-choice { grid-template-columns: 1fr; } }
+
+.mode-card {
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
+  display: flex; flex-direction: column; gap: 6px;
+  transition: border-color .15s, transform .15s;
+}
+.mode-card:hover, .mode-card:focus-visible { transform: translateY(-2px); }
+.mode-card.send:hover, .mode-card.send:focus-visible       { border-color: var(--amber); }
+.mode-card.receive:hover, .mode-card.receive:focus-visible { border-color: var(--cyan); }
+
+.mode-kicker {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.mode-title { font-size: 1.6rem; font-weight: 700; }
+.mode-card.send .mode-title    { color: var(--amber); }
+.mode-card.receive .mode-title { color: var(--cyan); }
+.mode-desc { color: var(--text-dim); font-size: 0.9rem; }
+
+.how { margin-top: 28px; border-top: 1px solid var(--line); padding-top: 16px; }
+.how summary { cursor: pointer; color: var(--text-dim); font-size: 0.9rem; }
+.how ol { margin: 12px 0 0 20px; color: var(--text-dim); font-size: 0.9rem; display: grid; gap: 6px; }
+
+/* ── Role pages ─────────────────────────────────────────────────────── */
+
+.btn-back {
+  background: none; border: none; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 0.85rem;
+  cursor: pointer; padding: 4px 0; margin-bottom: 10px;
+}
+.btn-back:hover { color: var(--text); }
+
+.role-title { font-size: 1.9rem; font-weight: 700; margin-bottom: 18px; }
+.role-title.send    { color: var(--amber); }
+.role-title.receive { color: var(--cyan); }
+
+/* ── Form elements ──────────────────────────────────────────────────── */
+
+.field { display: block; margin-bottom: 16px; }
+.field > span { display: block; font-size: 0.85rem; margin-bottom: 6px; color: var(--text-dim); }
+.field em { font-style: normal; opacity: 0.7; }
+
+input[type="password"], select {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  padding: 11px 12px;
+}
+input:focus-visible, select:focus-visible, button:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+body[data-mode="send"] :is(input, select, button):focus-visible { outline-color: var(--amber); }
+
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 560px) { .field-row { grid-template-columns: 1fr; } }
+
+.file-drop {
+  display: block;
+  border: 1.5px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 26px 16px;
+  text-align: center;
+  cursor: pointer;
+  margin-bottom: 16px;
+  color: var(--text-dim);
+  transition: border-color .15s;
+}
+.file-drop:hover { border-color: var(--amber); color: var(--text); }
+.file-drop input { display: none; }
+
+/* ── Buttons ────────────────────────────────────────────────────────── */
+
+.btn-primary, .btn-ghost {
+  font-family: var(--font-disp);
+  font-weight: 500;
+  font-size: 0.95rem;
+  border-radius: 8px;
+  padding: 12px 18px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.btn-primary {
+  width: 100%;
+  background: var(--text);
+  color: var(--ink);
+  border: none;
+}
+body[data-mode="send"] .btn-primary    { background: var(--amber); }
+body[data-mode="receive"] .btn-primary { background: var(--cyan); }
+.btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--text);
+}
+.btn-ghost:hover { border-color: var(--text-dim); }
+
+.btn-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.btn-row .btn-primary { width: auto; flex: 1; }
+
+/* ── Sender live view ───────────────────────────────────────────────── */
+
+/* the QR stage is deliberately the only pure-white surface in the app */
+#qr-stage {
+  background: #fff;
+  border-radius: var(--radius);
+  min-height: 300px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+}
+#qr-stage canvas { max-width: 100%; height: auto; image-rendering: pixelated; }
+
+.hud {
+  display: flex; justify-content: space-between;
+  margin-top: 10px;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+#send-live.done #qr-stage { outline: 3px solid var(--ok); }
+
+/* ── Camera views ───────────────────────────────────────────────────── */
+
+.cam-wrap { position: relative; margin-top: 14px; }
+.cam-wrap video {
+  width: 100%;
+  border-radius: var(--radius);
+  background: #000;
+  display: block;
+}
+
+.viewfinder {
+  position: absolute; inset: 12%;
+  border: 2px solid var(--cyan);
+  border-radius: 12px;
+  pointer-events: none;
+  mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0);
+  opacity: 0.85;
+}
+.viewfinder::before, .viewfinder::after {
+  content: ""; position: absolute; width: 22px; height: 22px;
+  border: 3px solid var(--cyan);
+}
+.viewfinder::before { top: -3px; left: -3px; border-right: none; border-bottom: none; border-radius: 8px 0 0 0; }
+.viewfinder::after  { bottom: -3px; right: -3px; border-left: none; border-top: none; border-radius: 0 0 8px 0; }
+
+.hint { font-size: 0.85rem; color: var(--text-dim); margin-top: 8px; text-align: center; }
+
+/* ── Receiver progress ──────────────────────────────────────────────── */
+
+.meta { margin-top: 12px; color: var(--text-dim); font-size: 0.82rem; word-break: break-all; }
+
+.progress-row {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 12px;
+}
+.bar-track {
+  flex: 1; height: 8px;
+  background: var(--panel-2);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, var(--cyan), #7BE8F0);
+  border-radius: 99px;
+  transition: width .2s;
+}
+.progress-row .mono { font-size: 0.85rem; color: var(--text-dim); }
+
+/* the signature element: a punch-card map of every frame, filling in live */
+#frame-grid {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9px, 1fr));
+  gap: 2px;
+  max-height: 160px;
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+#frame-grid i {
+  aspect-ratio: 1;
+  background: var(--panel-2);
+  border-radius: 1px;
+}
+#frame-grid i.on { background: var(--cyan); }
+
+/* ── ACK output ─────────────────────────────────────────────────────── */
+
+.ack-out {
+  margin-top: 14px;
+  background: #fff;
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex; flex-direction: column; align-items: center;
+}
+.ack-out canvas { max-width: 100%; height: auto; image-rendering: pixelated; }
+.ack-out .hint { color: #333; }
+
+/* ── Status & footer ────────────────────────────────────────────────── */
+
+.status {
+  margin-top: 16px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--amber);
+  min-height: 1.4em;
+}
+#panel-receive .status { color: var(--cyan); }
+
+.mono { font-family: var(--font-mono); }
+.hidden { display: none !important; }
+
+footer {
+  padding: 16px 20px 24px;
+  max-width: 720px; width: 100%;
+  margin: 0 auto;
+  border-top: 1px solid var(--line);
+}
+footer .mono { font-size: 0.7rem; color: var(--text-dim); letter-spacing: 0.02em; }
