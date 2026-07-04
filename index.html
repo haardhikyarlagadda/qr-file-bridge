@@ -78,10 +78,10 @@
         <label class="field">
           <span>Chunk size</span>
           <select id="send-chunk">
-            <option value="200">200 B — long distance / poor camera</option>
-            <option value="400" selected>400 B — balanced (default)</option>
-            <option value="800">800 B — good camera, close range</option>
-            <option value="1200">1200 B — ideal conditions only</option>
+            <option value="100">100 B — hardest conditions</option>
+            <option value="200" selected>200 B — default, most reliable</option>
+            <option value="400">400 B — good camera, close range</option>
+            <option value="800">800 B — ideal conditions only</option>
           </select>
         </label>
         <label class="field">
@@ -141,6 +141,7 @@
         <span id="scan-dot" class="scan-dot"></span>
         <span id="scan-text" class="mono">camera off</span>
       </div>
+      <p class="hint">Hold 15–25 cm away, fill the frame with the QR, avoid glare. If it won't lock, restart the send with a smaller chunk size.</p>
 
       <p id="recv-meta" class="mono meta"></p>
 

@@ -39,10 +39,18 @@ export class Receiver {
     return this.manifest !== null && this.chunks.size === this.totalFrames;
   }
 
-  /** Continuous camera scan loop. Runs until stop() or transfer completion. */
+  /**
+   * Continuous camera scan loop. Runs until stop() or transfer completion.
+   * Decoding strategy, in order of preference:
+   *   1. Native BarcodeDetector (hardware-assisted on Android Chrome —
+   *      far better at dense, high-version QR codes than any JS decoder)
+   *   2. jsQR fallback (all other browsers, incl. iOS Safari)
+   * The scan region is cropped to the center square matching the
+   * viewfinder — more pixels per QR module, faster decode.
+   */
   async startScanning(videoEl, canvasEl) {
     this.stream = await openCamera({
-      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
       audio: false,
     });
     videoEl.srcObject = this.stream;
@@ -50,16 +58,48 @@ export class Receiver {
     this.scanning = true;
     const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
 
-    const loop = () => {
-      if (!this.scanning) return;
-      if (videoEl.readyState === videoEl.HAVE_ENOUGH_DATA) {
-        canvasEl.width = videoEl.videoWidth;
-        canvasEl.height = videoEl.videoHeight;
-        ctx.drawImage(videoEl, 0, 0);
-        const img = ctx.getImageData(0, 0, canvasEl.width, canvasEl.height);
-        const code = jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
-        if (code) this._ingest(code.data);
+    let detector = null;
+    if ("BarcodeDetector" in window) {
+      try {
+        const formats = await BarcodeDetector.getSupportedFormats();
+        if (formats.includes("qr_code"))
+          detector = new BarcodeDetector({ formats: ["qr_code"] });
+      } catch { /* fall back to jsQR */ }
+    }
+
+    const scanOnce = async () => {
+      if (videoEl.readyState !== videoEl.HAVE_ENOUGH_DATA) return;
+      // Crop to the center square — matches the viewfinder overlay, and
+      // keeps every captured pixel spent on the QR instead of background.
+      const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+      const side = Math.floor(Math.min(vw, vh) * 0.92);
+      const sx = (vw - side) >> 1, sy = (vh - side) >> 1;
+      canvasEl.width = side;
+      canvasEl.height = side;
+      ctx.drawImage(videoEl, sx, sy, side, side, 0, 0, side, side);
+
+      let text = null;
+      if (detector) {
+        try {
+          const codes = await detector.detect(canvasEl);
+          if (codes.length) text = codes[0].rawValue;
+        } catch { /* transient detector error — jsQR below */ }
       }
+      if (text === null) {
+        const img = ctx.getImageData(0, 0, side, side);
+        const code = jsQR(img.data, side, side, { inversionAttempts: "dontInvert" });
+        if (code) text = code.data;
+      }
+      if (text !== null && !this._ingest(text)) {
+        // A QR was decoded but it isn't a frame of ours — tell the UI so
+        // the user can distinguish "unreadable" from "invisible".
+        this.ui.onForeign?.();
+      }
+    };
+
+    const loop = async () => {
+      if (!this.scanning) return;
+      await scanOnce();
       if (this.isComplete) { this.ui.onComplete(); return; }
       requestAnimationFrame(loop);
     };
@@ -74,13 +114,14 @@ export class Receiver {
     }
   }
 
+  /** Returns true if the decoded text was a valid frame of this session. */
   _ingest(text) {
     const frame = decodeFrame(text);
-    if (!frame || frame.magic !== MAGIC_DATA) return;
+    if (!frame || frame.magic !== MAGIC_DATA) return false;
 
     // Lock onto the first session we see; ignore frames from other sessions.
     if (this.sessionId === null) this.sessionId = frame.sessionId;
-    if (frame.sessionId !== this.sessionId) return;
+    if (frame.sessionId !== this.sessionId) return false;
 
     // Heartbeat: fires for EVERY valid frame of this session, duplicates
     // included — it tells the UI "the camera is locked on", which is
@@ -94,10 +135,11 @@ export class Receiver {
         this.ui.onManifest(this.manifest);
       }
     } else {
-      if (this.chunks.has(frame.frameIndex)) return; // duplicate — drop
+      if (this.chunks.has(frame.frameIndex)) return true; // duplicate — drop
       this.chunks.set(frame.frameIndex, frame.payload);
     }
     this.ui.onProgress(this.receivedCount, this.totalFrames, frame.frameIndex);
+    return true;
   }
 
   /** Render the ACK QR (missing list, or COMPLETE) onto a canvas for the sender to scan. */

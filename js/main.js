@@ -135,7 +135,7 @@ const grid = $("frame-grid");
 let gridCells = [];
 
 // ── Scan heartbeat: proves the camera is locked on, even between new frames ──
-const scan = { times: [], lastSeen: 0, lastIdx: null, timer: null };
+const scan = { times: [], lastSeen: 0, lastForeign: 0, lastIdx: null, timer: null };
 
 function setScanPill(state, text) {
   $("scan-dot").dataset.state = state;   // off | idle | live
@@ -157,12 +157,15 @@ function startScanTicker() {
   stopScanTicker();
   scan.timer = setInterval(() => {
     if (!receiver.scanning) { setScanPill("off", "camera off"); return; }
-    const idle = Date.now() - scan.lastSeen;
-    if (scan.lastSeen === 0 || idle > 1500) {
-      setScanPill("idle", "searching… align the camera with the sender's screen");
-    } else {
+    const now = Date.now();
+    const idle = now - scan.lastSeen;
+    if (scan.lastSeen !== 0 && idle <= 1500) {
       const rate = (scan.times.length / 3).toFixed(1);
       setScanPill("live", `locked on · frame #${scan.lastIdx} · ${rate}/s`);
+    } else if (scan.lastForeign !== 0 && now - scan.lastForeign <= 1500) {
+      setScanPill("idle", "QR detected but unreadable — move closer, hold steady");
+    } else {
+      setScanPill("idle", "searching… align the camera with the sender's screen");
     }
   }, 400);
 }
@@ -171,6 +174,7 @@ function stopScanTicker() { if (scan.timer) { clearInterval(scan.timer); scan.ti
 const receiver = new Receiver({
   onStatus: t => { $("recv-status").textContent = t; },
   onSignal: idx => scanHeartbeat(idx),
+  onForeign: () => { scan.lastForeign = Date.now(); },
   onBuild: (label, pct) => {
     const w = $("build-wrap");
     w.classList.remove("hidden");
