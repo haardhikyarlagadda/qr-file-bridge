@@ -106,3 +106,19 @@ its own screen.
 ## License
 
 MIT
+
+## Troubleshooting
+
+**"undefined is not an object (evaluating 'navigator.mediaDevices.getUserMedia')"**
+(iPhone/Safari) — the page was loaded over plain `http://`. Browsers expose
+the camera API only in a *secure context*: an `https://` URL or `localhost`.
+Accessing your dev machine over LAN IP (`http://192.168.x.x:8000`) is **not**
+secure. Fix: deploy to any HTTPS host (GitHub Pages works out of the box) or
+tunnel your local server through HTTPS (`ngrok http 8000`, Cloudflare Tunnel).
+The app now detects this and shows a banner instead of failing cryptically.
+
+**Camera permission denied** — allow camera access for the site in
+Settings → Safari (iOS) or the address-bar permissions (desktop), then retry.
+
+**Frames scan slowly on iPhone** — lower the sender frame rate to 1–2 fps
+and use the 200–400 B chunk sizes; Safari throttles camera processing.

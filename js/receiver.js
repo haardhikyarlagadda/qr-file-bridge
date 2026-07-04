@@ -2,6 +2,7 @@
 // camera → decode frames → buffer → ACK missing → reassemble → decrypt → save.
 
 import { decrypt, decompress, sha256hex } from "./crypto.js";
+import { openCamera } from "./camera.js";
 import {
   MAGIC_DATA, decodeFrame, decodeManifest, encodeAck,
   ACK_COMPLETE, ACK_MISSING,
@@ -40,7 +41,7 @@ export class Receiver {
 
   /** Continuous camera scan loop. Runs until stop() or transfer completion. */
   async startScanning(videoEl, canvasEl) {
-    this.stream = await navigator.mediaDevices.getUserMedia({
+    this.stream = await openCamera({
       video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false,
     });

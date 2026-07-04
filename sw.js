@@ -2,7 +2,7 @@
 // load so every subsequent use works fully offline: both devices can be in
 // airplane mode and the transfer still runs end to end.
 
-const CACHE = "qrfb-v1";
+const CACHE = "qrfb-v2";
 
 const ASSETS = [
   "./",
@@ -14,6 +14,7 @@ const ASSETS = [
   "./js/frame.js",
   "./js/crypto.js",
   "./js/base45.js",
+  "./js/camera.js",
   "./manifest.webmanifest",
   "https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js",
   "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js",

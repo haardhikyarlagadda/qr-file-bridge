@@ -3,6 +3,7 @@
 // The only outbound channel is light from the screen.
 
 import { compress, encrypt, sha256hex } from "./crypto.js";
+import { openCamera } from "./camera.js";
 import {
   MAGIC_DATA, encodeFrame, encodeManifest, decodeFrame, decodeAck,
   MAGIC_ACK, ACK_COMPLETE,
@@ -144,7 +145,7 @@ export class Sender {
    * Resolves { status, missing } once a valid ACK for this session is seen.
    */
   async scanAck(videoEl, canvasEl, signal) {
-    const stream = await navigator.mediaDevices.getUserMedia({
+    const stream = await openCamera({
       video: { facingMode: "environment" }, audio: false,
     });
     videoEl.srcObject = stream;

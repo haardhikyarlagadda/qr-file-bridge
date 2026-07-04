@@ -215,6 +215,16 @@ $("btn-save").onclick = async () => {
   }
 };
 
+// ── Secure-context check (camera won't exist over plain http) ───────────────
+if (!window.isSecureContext) {
+  const warn = document.createElement("div");
+  warn.className = "https-warn";
+  warn.textContent =
+    "⚠ This page is not HTTPS, so the camera is disabled by the browser. " +
+    "Open the app from an https:// URL (e.g. GitHub Pages) or localhost.";
+  document.querySelector("main").prepend(warn);
+}
+
 // ── PWA: offline after first load ────────────────────────────────────────────
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("./sw.js").catch(() => { /* offline install is best-effort */ });
