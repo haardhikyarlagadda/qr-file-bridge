@@ -209,6 +209,7 @@ export class Sender {
     const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
 
     let detector = null;
+    await (window.__bdReady ?? Promise.resolve()); // ZXing polyfill on iOS
     if ("BarcodeDetector" in window) {
       try {
         const formats = await BarcodeDetector.getSupportedFormats();

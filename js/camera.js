@@ -19,7 +19,17 @@ export async function openCamera(constraints) {
     );
   }
   try {
-    return await navigator.mediaDevices.getUserMedia(constraints);
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    // Ask for continuous autofocus where supported (helps close-range QR
+    // scanning; silently ignored on browsers that don't expose focusMode).
+    try {
+      const track = stream.getVideoTracks()[0];
+      const caps = track.getCapabilities?.();
+      if (caps?.focusMode?.includes?.("continuous")) {
+        await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+      }
+    } catch { /* best-effort */ }
+    return stream;
   } catch (e) {
     if (e.name === "NotAllowedError")
       throw new Error("Camera permission denied. Allow camera access in your browser settings and retry.");

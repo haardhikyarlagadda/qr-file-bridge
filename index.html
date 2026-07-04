@@ -13,6 +13,19 @@
 <link rel="stylesheet" href="css/style.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<script type="module">
+// iOS Safari has no native BarcodeDetector, and jsQR struggles with dense
+// screen-to-camera codes. Polyfill with a WebAssembly build of ZXing —
+// near-native decode quality. The app awaits window.__bdReady before
+// creating a detector so there's no startup race.
+window.__bdReady = (async () => {
+  if (!("BarcodeDetector" in window)) {
+    try {
+      await import("https://cdn.jsdelivr.net/npm/barcode-detector@2/dist/es/side-effects.min.js");
+    } catch { /* offline or blocked — jsQR fallback still works */ }
+  }
+})();
+</script>
 </head>
 <body data-mode="home">
 

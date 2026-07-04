@@ -76,6 +76,7 @@ export class Receiver {
     const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
 
     let detector = null;
+    await (window.__bdReady ?? Promise.resolve()); // wait for the ZXing polyfill on iOS
     if ("BarcodeDetector" in window) {
       try {
         const formats = await BarcodeDetector.getSupportedFormats();
@@ -102,7 +103,19 @@ export class Receiver {
       }
       if (text === null) {
         const img = ctx.getImageData(0, 0, side, side);
-        const code = jsQR(img.data, side, side, { inversionAttempts: "dontInvert" });
+        let code = jsQR(img.data, side, side, { inversionAttempts: "dontInvert" });
+        if (!code && side > 700) {
+          // Dense codes at high res sometimes decode better half-scaled:
+          // downscaling averages out camera noise and screen moiré.
+          this._scaleCanvas ??= document.createElement("canvas");
+          const half = side >> 1;
+          const sc = this._scaleCanvas;
+          sc.width = sc.height = half;
+          const sctx = sc.getContext("2d", { willReadFrequently: true });
+          sctx.drawImage(canvasEl, 0, 0, half, half);
+          const im2 = sctx.getImageData(0, 0, half, half);
+          code = jsQR(im2.data, half, half, { inversionAttempts: "dontInvert" });
+        }
         if (code) text = code.data;
       }
       if (text !== null && !this._ingest(text)) this.ui.onForeign?.();
