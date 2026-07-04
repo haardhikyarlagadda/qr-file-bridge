@@ -2,7 +2,7 @@
 // load so every subsequent use works fully offline: both devices can be in
 // airplane mode and the transfer still runs end to end.
 
-const CACHE = "qrfb-v6";
+const CACHE = "qrfb-v8";
 
 const ASSETS = [
   "./",
@@ -34,8 +34,22 @@ self.addEventListener("activate", (e) => {
   );
 });
 
-// Cache-first: once installed, the network is never required again.
+// Navigations are network-first (so a deploy is picked up on the next load,
+// with the cache as offline fallback). Everything else stays cache-first so
+// transfers keep working fully offline once installed.
 self.addEventListener("fetch", (e) => {
+  if (e.request.mode === "navigate") {
+    e.respondWith(
+      fetch(e.request)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy));
+          return res;
+        })
+        .catch(() => caches.match(e.request, { ignoreSearch: true }))
+    );
+    return;
+  }
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then(
       (hit) =>

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR File Bridge — decoder diagnostics</title>
+<style>
+  body { font: 15px/1.5 -apple-system, system-ui, sans-serif; background:#10141F; color:#E8ECF4;
+         margin:0; padding:16px; }
+  h1 { font-size:1.2rem; } h2 { font-size:1rem; margin:22px 0 8px; color:#4AD6E0; }
+  .card { background:#1A2130; border:1px solid #2E3A52; border-radius:10px; padding:12px 14px; margin:10px 0; }
+  table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+  td, th { padding:5px 6px; border-bottom:1px solid #2E3A52; text-align:left; }
+  .ok   { color:#5CD879; font-weight:600; }
+  .fail { color:#FF6B6B; font-weight:600; }
+  .warn { color:#FFB224; font-weight:600; }
+  button { background:#4AD6E0; color:#10141F; border:none; border-radius:8px;
+           padding:10px 14px; font-size:0.95rem; margin:4px 6px 4px 0; }
+  button.ghost { background:transparent; border:1px solid #2E3A52; color:#E8ECF4; }
+  video { width:100%; border-radius:10px; background:#000; }
+  #pattern { position:fixed; inset:0; background:#fff; display:none;
+             flex-direction:column; align-items:center; justify-content:center; z-index:9; }
+  #pattern canvas { max-width:92vw; max-height:80vh; image-rendering:pixelated; }
+  #pattern p { color:#000; font-family:monospace; }
+  pre { white-space:pre-wrap; word-break:break-all; font-size:0.75rem; color:#8B96AB; }
+  .mono { font-family: ui-monospace, monospace; font-size:0.8rem; color:#8B96AB; }
+</style>
+</head>
+<body>
+<h1>Decoder diagnostics</h1>
+<p class="mono">Isolates each layer: environment → library load → synthetic decode (no camera) → live camera decode. Run every section top to bottom and report the results.</p>
+
+<h2>1 · Environment</h2>
+<div class="card"><table id="env"></table></div>
+
+<h2>2 · Library load</h2>
+<div class="card"><table id="libs"></table></div>
+
+<h2>3 · Synthetic decode — no camera involved</h2>
+<p class="mono">Generates QR codes on a clean canvas at the four app chunk densities and feeds them straight to each decoder. Anything failing here is a decoder/library problem, not a camera problem.</p>
+<div class="card">
+  <button id="btn-synth">Run synthetic tests</button>
+  <table id="synth"><tr><th>Payload</th><th>QR ver</th><th>ZXing/BD</th><th>jsQR</th></tr></table>
+</div>
+
+<h2>4 · Live camera decode</h2>
+<p class="mono">Runs both decoders on every camera frame. Point at any QR — the app's session code, a test pattern from another device, even a product barcode's QR. Watch which decoder registers hits.</p>
+<div class="card">
+  <button id="btn-cam">Start camera</button>
+  <button id="btn-flip" class="ghost">Flip</button>
+  <video id="v" playsinline muted></video>
+  <table id="cam">
+    <tr><td>Stream resolution</td><td id="cam-res">—</td></tr>
+    <tr><td>ZXing/BD hits</td><td id="hit-bd">0</td></tr>
+    <tr><td>jsQR hits</td><td id="hit-js">0</td></tr>
+    <tr><td>Last decode</td><td id="last">—</td></tr>
+    <tr><td>Scan rate</td><td id="rate">—</td></tr>
+  </table>
+</div>
+
+<h2>5 · Test pattern (for a second device)</h2>
+<p class="mono">Open this page on the sender phone too and show a pattern; scan it with section 4 on the iPhone. That reproduces the exact screen→camera path with a known payload.</p>
+<div class="card">
+  <button class="ghost" data-len="170">~100 B frame</button>
+  <button class="ghost" data-len="330">~200 B frame</button>
+  <button class="ghost" data-len="620">~400 B frame</button>
+  <button class="ghost" data-len="1220">~800 B frame</button>
+</div>
+
+<div id="pattern" onclick="this.style.display='none'">
+  <canvas id="pattern-canvas"></canvas>
+  <p id="pattern-label"></p>
+</div>
+
+<h2>Log</h2>
+<pre id="log"></pre>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<script type="module">
+const $ = id => document.getElementById(id);
+const log = m => { $("log").textContent += m + "\n"; };
+const row = (table, k, v, cls="") =>
+  $(table).insertAdjacentHTML("beforeend", `<tr><td>${k}</td><td class="${cls}">${v}</td></tr>`);
+const B45 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+const payload = n => Array.from({length:n}, (_,i)=>B45[(i*7+3)%45]).join("");
+
+// ── 1 · Environment ──────────────────────────────────────────────────────────
+row("env", "User agent", navigator.userAgent);
+row("env", "Secure context (camera prerequisite)", window.isSecureContext ? "yes" : "NO", window.isSecureContext ? "ok":"fail");
+row("env", "navigator.mediaDevices", navigator.mediaDevices ? "present" : "MISSING", navigator.mediaDevices ? "ok":"fail");
+row("env", "Native BarcodeDetector", "BarcodeDetector" in window ? "yes" : "no (expected on iOS — polyfill should cover)", "BarcodeDetector" in window ? "ok":"warn");
+row("env", "WebAssembly", typeof WebAssembly !== "undefined" ? "yes" : "NO", typeof WebAssembly !== "undefined" ? "ok":"fail");
+
+// ── 2 · Library load ─────────────────────────────────────────────────────────
+row("libs", "qrcode-generator (encoder)", typeof qrcode === "function" ? "loaded" : "FAILED", typeof qrcode === "function" ? "ok":"fail");
+row("libs", "jsQR", typeof jsQR === "function" ? "loaded" : "FAILED", typeof jsQR === "function" ? "ok":"fail");
+
+let detector = null;
+try {
+  if (!("BarcodeDetector" in window)) {
+    await import("https://cdn.jsdelivr.net/npm/barcode-detector@2/dist/es/side-effects.min.js");
+    row("libs", "barcode-detector polyfill (ESM import)", "loaded", "ok");
+  } else {
+    row("libs", "barcode-detector polyfill", "not needed (native present)", "ok");
+  }
+} catch (e) {
+  row("libs", "barcode-detector polyfill (ESM import)", "FAILED: " + e.message, "fail");
+  log("polyfill import error: " + (e.stack || e.message));
+}
+try {
+  if ("BarcodeDetector" in window) {
+    const formats = await BarcodeDetector.getSupportedFormats();
+    row("libs", "BD supported formats", formats.join(", ") || "(none)", formats.includes("qr_code") ? "ok":"fail");
+    if (formats.includes("qr_code")) {
+      detector = new BarcodeDetector({ formats: ["qr_code"] });
+      // WASM warm-up on a trivial canvas — proves the .wasm actually fetched.
+      const c = document.createElement("canvas"); c.width = c.height = 50;
+      await detector.detect(c);
+      row("libs", "ZXing WASM warm-up detect()", "works", "ok");
+    }
+  } else {
+    row("libs", "BarcodeDetector after polyfill", "STILL MISSING", "fail");
+  }
+} catch (e) {
+  row("libs", "ZXing WASM warm-up detect()", "FAILED: " + e.message, "fail");
+  log("wasm/detector error: " + (e.stack || e.message));
+  detector = null;
+}
+
+// ── QR render helper (same as the app) ───────────────────────────────────────
+function renderQR(data, target) {
+  const qr = qrcode(0, "M");
+  qr.addData(data, "Alphanumeric");
+  qr.make();
+  const m = qr.getModuleCount();
+  const scale = Math.max(2, Math.floor(640 / (m + 8)));
+  const quiet = 4 * scale;
+  const size = m * scale + quiet * 2;
+  target.width = target.height = size;
+  const ctx = target.getContext("2d");
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = "#000";
+  for (let r = 0; r < m; r++) for (let c = 0; c < m; c++)
+    if (qr.isDark(r, c)) ctx.fillRect(quiet + c*scale, quiet + r*scale, scale, scale);
+  return { modules: m, size };
+}
+
+// ── 3 · Synthetic decode ─────────────────────────────────────────────────────
+$("btn-synth").onclick = async () => {
+  for (const len of [170, 330, 620, 1220]) {
+    const data = payload(len);
+    const cv = document.createElement("canvas");
+    let ver = "?";
+    try { ver = renderQR(data, cv).modules + "px"; }
+    catch (e) { $("synth").insertAdjacentHTML("beforeend",
+      `<tr><td>${len} ch</td><td colspan="3" class="fail">encode failed: ${e.message}</td></tr>`); continue; }
+
+    let bd = "—", bdc = "warn";
+    if (detector) {
+      try {
+        const t0 = performance.now();
+        const codes = await detector.detect(cv);
+        const ms = (performance.now() - t0).toFixed(0);
+        const hit = codes.length && codes[0].rawValue === data;
+        bd = hit ? `PASS ${ms}ms` : (codes.length ? "WRONG DATA" : "no decode");
+        bdc = hit ? "ok" : "fail";
+      } catch (e) { bd = "ERR " + e.message; bdc = "fail"; }
+    }
+    let js = "—", jsc = "warn";
+    try {
+      const ctx = cv.getContext("2d");
+      const img = ctx.getImageData(0, 0, cv.width, cv.height);
+      const t0 = performance.now();
+      const code = jsQR(img.data, cv.width, cv.height, { inversionAttempts: "dontInvert" });
+      const ms = (performance.now() - t0).toFixed(0);
+      const hit = code && code.data === data;
+      js = hit ? `PASS ${ms}ms` : (code ? "WRONG DATA" : "no decode");
+      jsc = hit ? "ok" : "fail";
+    } catch (e) { js = "ERR " + e.message; jsc = "fail"; }
+
+    $("synth").insertAdjacentHTML("beforeend",
+      `<tr><td>${len} ch</td><td>${ver}</td><td class="${bdc}">${bd}</td><td class="${jsc}">${js}</td></tr>`);
+    await new Promise(r => setTimeout(r, 30));
+  }
+  log("synthetic tests done");
+};
+
+// ── 4 · Live camera ──────────────────────────────────────────────────────────
+let stream = null, scanning = false, facing = "environment";
+let hits = { bd: 0, js: 0 }, frames = [], scaleCanvas = null;
+
+$("btn-cam").onclick = async () => {
+  if (scanning) { stopCam(); return; }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    try {
+      const track = stream.getVideoTracks()[0];
+      const caps = track.getCapabilities?.();
+      if (caps?.focusMode?.includes?.("continuous"))
+        await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+      log("track settings: " + JSON.stringify(track.getSettings?.() ?? {}));
+    } catch (e) { log("focus constraint: " + e.message); }
+    const v = $("v");
+    v.srcObject = stream; await v.play();
+    scanning = true; $("btn-cam").textContent = "Stop camera";
+    loop();
+  } catch (e) {
+    log("camera error: " + e.message);
+    $("cam-res").textContent = "camera error: " + e.message;
+  }
+};
+$("btn-flip").onclick = () => { facing = facing === "environment" ? "user" : "environment"; if (scanning) { stopCam(); $("btn-cam").click(); } };
+function stopCam() { scanning = false; stream?.getTracks().forEach(t => t.stop()); stream = null; $("btn-cam").textContent = "Start camera"; }
+
+const work = document.createElement("canvas");
+const wctx = work.getContext("2d", { willReadFrequently: true });
+
+async function loop() {
+  if (!scanning) return;
+  const v = $("v");
+  if (v.readyState === v.HAVE_ENOUGH_DATA) {
+    $("cam-res").textContent = `${v.videoWidth}×${v.videoHeight}`;
+    const side = Math.floor(Math.min(v.videoWidth, v.videoHeight) * 0.92);
+    const sx = (v.videoWidth - side) >> 1, sy = (v.videoHeight - side) >> 1;
+    work.width = work.height = side;
+    wctx.drawImage(v, sx, sy, side, side, 0, 0, side, side);
+
+    frames.push(Date.now());
+    while (frames.length && Date.now() - frames[0] > 3000) frames.shift();
+    $("rate").textContent = (frames.length / 3).toFixed(1) + " scans/s";
+
+    if (detector) {
+      try {
+        const codes = await detector.detect(work);
+        if (codes.length) { hits.bd++; $("hit-bd").textContent = hits.bd;
+          $("last").textContent = `ZXing/BD · ${codes[0].rawValue.length} ch`; }
+      } catch { /* ignore per-frame errors */ }
+    }
+    try {
+      const img = wctx.getImageData(0, 0, side, side);
+      let code = jsQR(img.data, side, side, { inversionAttempts: "dontInvert" });
+      if (!code && side > 700) {
+        scaleCanvas ??= document.createElement("canvas");
+        const half = side >> 1;
+        scaleCanvas.width = scaleCanvas.height = half;
+        const sc = scaleCanvas.getContext("2d", { willReadFrequently: true });
+        sc.drawImage(work, 0, 0, half, half);
+        const im2 = sc.getImageData(0, 0, half, half);
+        code = jsQR(im2.data, half, half, { inversionAttempts: "dontInvert" });
+      }
+      if (code) { hits.js++; $("hit-js").textContent = hits.js;
+        $("last").textContent = `jsQR · ${code.data.length} ch`; }
+    } catch { /* ignore */ }
+  }
+  requestAnimationFrame(loop);
+}
+
+// ── 5 · Test pattern ─────────────────────────────────────────────────────────
+document.querySelectorAll("[data-len]").forEach(b => b.onclick = () => {
+  const len = parseInt(b.dataset.len, 10);
+  renderQR(payload(len), $("pattern-canvas"));
+  $("pattern-label").textContent = `${len} chars — tap anywhere to close`;
+  $("pattern").style.display = "flex";
+});
+</script>
+</body>
+</html>
