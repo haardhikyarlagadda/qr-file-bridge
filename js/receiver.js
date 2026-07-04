@@ -1,28 +1,40 @@
-// receiver.js — the receive side.
-// camera → decode frames → buffer → ACK missing → reassemble → decrypt → save.
+// receiver.js — the receive side, TCP-style over light.
+//
+// Phases:
+//   handshake — camera scans until Frame 0 (the manifest / SYN) is decoded.
+//               The UI then prompts for the passphrase.
+//   receiving — after the user confirms, the screen shows a READY ACK
+//               (SYN-ACK). From then on the camera keeps decoding data
+//               frames while the screen auto-refreshes ACK QRs carrying
+//               the cumulative base + missing ranges (SACK).
+//   complete  — a persistent COMPLETE ACK (FIN) tells the sender to stop;
+//               build (decrypt/verify/save) runs on the buffered chunks.
 
 import { decrypt, decompress, sha256hex } from "./crypto.js";
 import { openCamera } from "./camera.js";
 import {
   MAGIC_DATA, decodeFrame, decodeManifest, encodeAck,
-  ACK_COMPLETE, ACK_MISSING,
+  ACK_COMPLETE, ACK_MISSING, ACK_READY,
 } from "./frame.js";
 
 /* global qrcode, jsQR */
 
 export class Receiver {
   constructor(ui) {
-    this.ui = ui;        // callbacks: onStatus, onProgress, onManifest, onComplete
+    // ui callbacks: onStatus, onProgress, onManifest, onComplete,
+    //               onSignal(frameIdx), onForeign, onBuild(label, pct)
+    this.ui = ui;
     this.reset();
   }
 
   reset() {
     this.sessionId = null;
     this.manifest = null;
-    this.chunks = new Map();   // frameIndex (1-based) → Uint8Array
-    this.totalFrames = 0;      // data frames, excludes manifest
+    this.chunks = new Map();
+    this.totalFrames = 0;
     this.stream = null;
     this.scanning = false;
+    this.phase = "idle"; // idle | handshake | receiving | complete
   }
 
   get receivedCount() { return this.chunks.size; }
@@ -39,16 +51,21 @@ export class Receiver {
     return this.manifest !== null && this.chunks.size === this.totalFrames;
   }
 
+  /** Cumulative ack: the lowest frame index not yet received. */
+  get ackBase() {
+    if (!this.manifest) return 0;
+    for (let i = 1; i <= this.totalFrames; i++)
+      if (!this.chunks.has(i)) return i;
+    return this.totalFrames + 1;
+  }
+
   /**
-   * Continuous camera scan loop. Runs until stop() or transfer completion.
-   * Decoding strategy, in order of preference:
-   *   1. Native BarcodeDetector (hardware-assisted on Android Chrome —
-   *      far better at dense, high-version QR codes than any JS decoder)
-   *   2. jsQR fallback (all other browsers, incl. iOS Safari)
-   * The scan region is cropped to the center square matching the
-   * viewfinder — more pixels per QR module, faster decode.
+   * Open the camera and scan continuously. In handshake phase, decoding the
+   * manifest fires onManifest (UI prompts for the passphrase); data frames
+   * arriving early are buffered anyway — nothing is wasted.
    */
   async startScanning(videoEl, canvasEl) {
+    this.phase = this.phase === "idle" ? "handshake" : this.phase;
     this.stream = await openCamera({
       video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
       audio: false,
@@ -64,13 +81,11 @@ export class Receiver {
         const formats = await BarcodeDetector.getSupportedFormats();
         if (formats.includes("qr_code"))
           detector = new BarcodeDetector({ formats: ["qr_code"] });
-      } catch { /* fall back to jsQR */ }
+      } catch { /* jsQR below */ }
     }
 
     const scanOnce = async () => {
       if (videoEl.readyState !== videoEl.HAVE_ENOUGH_DATA) return;
-      // Crop to the center square — matches the viewfinder overlay, and
-      // keeps every captured pixel spent on the QR instead of background.
       const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
       const side = Math.floor(Math.min(vw, vh) * 0.92);
       const sx = (vw - side) >> 1, sy = (vh - side) >> 1;
@@ -83,24 +98,24 @@ export class Receiver {
         try {
           const codes = await detector.detect(canvasEl);
           if (codes.length) text = codes[0].rawValue;
-        } catch { /* transient detector error — jsQR below */ }
+        } catch { /* transient */ }
       }
       if (text === null) {
         const img = ctx.getImageData(0, 0, side, side);
         const code = jsQR(img.data, side, side, { inversionAttempts: "dontInvert" });
         if (code) text = code.data;
       }
-      if (text !== null && !this._ingest(text)) {
-        // A QR was decoded but it isn't a frame of ours — tell the UI so
-        // the user can distinguish "unreadable" from "invisible".
-        this.ui.onForeign?.();
-      }
+      if (text !== null && !this._ingest(text)) this.ui.onForeign?.();
     };
 
     const loop = async () => {
       if (!this.scanning) return;
       await scanOnce();
-      if (this.isComplete) { this.ui.onComplete(); return; }
+      if (this.isComplete && this.phase !== "complete") {
+        this.phase = "complete";
+        this.ui.onComplete();
+        return;
+      }
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
@@ -119,13 +134,9 @@ export class Receiver {
     const frame = decodeFrame(text);
     if (!frame || frame.magic !== MAGIC_DATA) return false;
 
-    // Lock onto the first session we see; ignore frames from other sessions.
     if (this.sessionId === null) this.sessionId = frame.sessionId;
     if (frame.sessionId !== this.sessionId) return false;
 
-    // Heartbeat: fires for EVERY valid frame of this session, duplicates
-    // included — it tells the UI "the camera is locked on", which is
-    // distinct from "we learned something new".
     this.ui.onSignal?.(frame.frameIndex);
 
     if (frame.frameIndex === 0) {
@@ -135,18 +146,31 @@ export class Receiver {
         this.ui.onManifest(this.manifest);
       }
     } else {
-      if (this.chunks.has(frame.frameIndex)) return true; // duplicate — drop
+      if (this.chunks.has(frame.frameIndex)) return true; // duplicate
       this.chunks.set(frame.frameIndex, frame.payload);
     }
     this.ui.onProgress(this.receivedCount, this.totalFrames, frame.frameIndex);
     return true;
   }
 
-  /** Render the ACK QR (missing list, or COMPLETE) onto a canvas for the sender to scan. */
+  /** Move from handshake to the data phase (after passphrase entry). */
+  beginReceiving() {
+    if (!this.manifest) throw new Error("Scan the session code first.");
+    this.phase = "receiving";
+  }
+
+  /**
+   * Render the current ACK onto a canvas:
+   *   no chunks yet   → READY   (SYN-ACK)
+   *   partial         → MISSING (base + SACK ranges)
+   *   everything      → COMPLETE (FIN)
+   */
   renderAckQR(canvas) {
-    if (this.sessionId === null) return false;
-    const status = this.isComplete ? ACK_COMPLETE : ACK_MISSING;
-    const data = encodeAck(this.sessionId, status, this.missingFrames);
+    if (this.sessionId === null || !this.manifest) return false;
+    const status = this.isComplete ? ACK_COMPLETE
+      : this.chunks.size === 0 ? ACK_READY
+      : ACK_MISSING;
+    const data = encodeAck(this.sessionId, status, this.missingFrames, this.ackBase);
     const qr = qrcode(0, "M");
     qr.addData(data, "Alphanumeric");
     qr.make();
@@ -165,12 +189,7 @@ export class Receiver {
     return true;
   }
 
-  /**
-   * Reassemble, decrypt, decompress, verify, and hand back a downloadable file.
-   * Reports staged progress via ui.onBuild(label, pct):
-   * reassemble 0→40 (real per-chunk progress), decrypt →70,
-   * decompress →85, verify →95, done 100.
-   */
+  /** Reassemble, decrypt, decompress, verify. Reports ui.onBuild(label, pct). */
   async assemble(passphrase) {
     if (!this.isComplete) throw new Error("Transfer incomplete — frames still missing.");
     const m = this.manifest;
@@ -188,7 +207,7 @@ export class Receiver {
       off += c.length;
       if (i % yieldEvery === 0) {
         build(`Reassembling chunks… ${i} / ${this.totalFrames}`, (i / this.totalFrames) * 40);
-        await new Promise(r => setTimeout(r)); // let the progress bar paint
+        await new Promise(r => setTimeout(r));
       }
     }
 

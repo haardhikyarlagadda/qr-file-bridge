@@ -107,14 +107,18 @@ export function decodeManifest(payload) {
 
 // ── ACK frames (receiver → sender) ───────────────────────────────────────────
 
-export const ACK_COMPLETE = 0x00;
-export const ACK_MISSING = 0x01;
+export const ACK_COMPLETE = 0x00; // FIN: everything received
+export const ACK_MISSING = 0x01;  // SACK: base + missing ranges
+export const ACK_READY = 0x04;    // SYN-ACK: handshake done, send data
 
 /**
- * Encode missing-frame indices as ranges ("5,9-14,22") so even a large
- * missing set fits comfortably in a single QR code.
+ * Encode an acknowledgement (receiver → sender), TCP-style:
+ * `base` is the cumulative ack — the lowest frame index not yet received
+ * (everything below it is in). `missing` lists missing indices as ranges
+ * ("5,9-14,22"), which stays compact even when most of the file is
+ * outstanding (e.g. "1-500").
  */
-export function encodeAck(sessionId, status, missing = []) {
+export function encodeAck(sessionId, status, missing = [], base = 0) {
   const ranges = [];
   const sorted = [...missing].sort((a, b) => a - b);
   for (let i = 0; i < sorted.length; i++) {
@@ -123,11 +127,11 @@ export function encodeAck(sessionId, status, missing = []) {
     while (i + 1 < sorted.length && sorted[i + 1] === end + 1) { end = sorted[++i]; }
     ranges.push(start === end ? `${start}` : `${start}-${end}`);
   }
-  const payload = te.encode(JSON.stringify({ status, missing: ranges.join(",") }));
+  const payload = te.encode(JSON.stringify({ status, base, missing: ranges.join(",") }));
   return encodeFrame(MAGIC_ACK, sessionId, 0, 0, payload);
 }
 
-/** Expand an ACK payload back into { status, missing:[indices] }. */
+/** Expand an ACK payload back into { status, base, missing:[indices] }. */
 export function decodeAck(payload) {
   const a = JSON.parse(td.decode(payload));
   const missing = [];
@@ -139,5 +143,5 @@ export function decodeAck(payload) {
       else for (let i = s; i <= e; i++) missing.push(i);
     }
   }
-  return { status: a.status, missing };
+  return { status: a.status, base: a.base ?? 0, missing };
 }

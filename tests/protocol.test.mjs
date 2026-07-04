@@ -63,8 +63,17 @@ ok("wrong passphrase rejected by GCM tag", threw);
 ok("corrupt frame -> null (CRC)", decodeFrame(frames[5].slice(0,-4)+"AAAA") === null);
 ok("garbage -> null", decodeFrame("HELLO WORLD 123") === null);
 
-const ack = decodeAck(decodeFrame(encodeAck(sessionId, 0x01, [5,6,7,12,40,41])).payload);
+const ack = decodeAck(decodeFrame(encodeAck(sessionId, 0x01, [5,6,7,12,40,41], 5)).payload);
 ok("ack ranges round-trip", JSON.stringify(ack.missing)===JSON.stringify([5,6,7,12,40,41]) && ack.status===1);
+ok("ack cumulative base", ack.base===5);
+const ready = decodeAck(decodeFrame(encodeAck(sessionId, 0x04, [], 1)).payload);
+ok("ack READY (SYN-ACK)", ready.status===0x04 && ready.missing.length===0 && ready.base===1);
+const fin = decodeAck(decodeFrame(encodeAck(sessionId, 0x00, [], total+1)).payload);
+ok("ack COMPLETE (FIN)", fin.status===0 && fin.missing.length===0);
+// a full initial missing set stays compact as one range
+const full = encodeAck(sessionId, 0x04, Array.from({length: total}, (_,i)=>i+1), 1);
+ok("full missing set compact", full.length < 200);
+ok("full missing decodes", decodeAck(decodeFrame(full).payload).missing.length === total);
 
 const tiny = new Uint8Array([42]);
 const tc = await compress(tiny);

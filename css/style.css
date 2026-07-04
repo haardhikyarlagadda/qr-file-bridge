@@ -425,3 +425,37 @@ footer .mono { font-size: 0.7rem; color: var(--text-dim); letter-spacing: 0.02em
 .build.ok .build-head   { color: var(--ok); }
 .build.fail .build-fill { background: var(--err); }
 .build.fail .build-head { color: var(--err); }
+
+/* ── Session-sync protocol UI ───────────────────────────────────────── */
+
+.phase-badge {
+  display: inline-block;
+  margin-bottom: 10px;
+  padding: 5px 12px;
+  border-radius: 99px;
+  font-size: 0.75rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+}
+.phase-badge[data-phase="handshake"] { border-color: var(--amber); color: var(--amber); }
+.phase-badge[data-phase="sending"]   { border-color: var(--amber); color: var(--text); }
+.phase-badge[data-phase="done"]      { border-color: var(--ok); color: var(--ok); }
+
+.cam-wrap.small video { max-height: 180px; object-fit: cover; }
+
+.session-card {
+  margin-top: 14px;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--cyan);
+  border-radius: var(--radius);
+}
+.session-title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--cyan);
+  margin-bottom: 6px;
+}
+.session-card .meta { margin: 0 0 14px; }

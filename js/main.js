@@ -1,6 +1,12 @@
-// main.js — UI orchestration. Wires the Sender and Receiver engines to the DOM.
+// main.js — UI orchestration for the TCP-style optical protocol.
+//
+// Sender:   prepare → handshake (SYN = manifest QR + ACK-watch camera on)
+//           → windows advance automatically as ACKs arrive → done on FIN.
+// Receiver: scan session code (no passphrase yet) → passphrase prompt
+//           → READY ACK (SYN-ACK) → auto-ACK cadence during data
+//           → persistent COMPLETE ACK (FIN) → build & save.
 
-import { Sender, ACK_COMPLETE } from "./sender.js";
+import { Sender } from "./sender.js";
 import { Receiver } from "./receiver.js";
 
 const $ = id => document.getElementById(id);
@@ -13,18 +19,12 @@ function fmtBytes(n) {
   return `${(n / 1024 ** 2).toFixed(2)} MB`;
 }
 
-function fmtTime(s) {
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  return `${m}m ${s % 60}s`;
-}
-
 let wakeLock = null;
 async function keepAwake(on) {
   try {
     if (on && "wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen");
     else if (wakeLock) { await wakeLock.release(); wakeLock = null; }
-  } catch { /* wake lock is best-effort */ }
+  } catch { /* best-effort */ }
 }
 
 // ── Mode switching ───────────────────────────────────────────────────────────
@@ -38,10 +38,12 @@ function show(name) {
 $("btn-mode-send").onclick = () => show("send");
 $("btn-mode-receive").onclick = () => show("receive");
 document.querySelectorAll(".btn-back").forEach(b => b.onclick = () => {
-  sender.stop(); receiver.stop(); keepAwake(false); show("home");
+  sender.stop(); receiver.stop(); stopScanTicker(); stopAutoAck(); keepAwake(false); show("home");
 });
 
 // ═══════════════════════════════════════ SENDER ══════════════════════════════
+
+let ackFacing = "user"; // front camera by default: phones face each other
 
 const sender = new Sender({
   onStatus: t => { $("send-status").textContent = t; },
@@ -50,11 +52,23 @@ const sender = new Sender({
     stage.innerHTML = "";
     if (canvas) stage.appendChild(canvas);
     $("send-frame-label").textContent = `frame ${idx} / ${total - 1}`;
-    $("send-loop-label").textContent = `slot ${pos + 1} of ${playlistLen}`;
+    $("send-loop-label").textContent = `window slot ${pos + 1} of ${playlistLen}`;
   },
+  onPhase: (phase, detail) => {
+    const badge = $("send-phase");
+    badge.dataset.phase = phase;
+    badge.textContent =
+      phase === "handshake" ? "handshake — waiting for receiver"
+      : phase === "sending" ? "sending — window mode"
+      : "complete";
+    $("send-status").textContent = detail;
+    if (phase === "done") {
+      $("send-live").classList.add("done");
+      keepAwake(false);
+    }
+  },
+  onAck: () => { /* phase handler covers the messaging */ },
 });
-
-let prepared = null;
 
 $("send-file").onchange = () => {
   const f = $("send-file").files[0];
@@ -73,14 +87,21 @@ $("btn-prepare").onclick = async () => {
   $("btn-prepare").disabled = true;
 
   try {
-    prepared = await sender.prepare(file, pass, chunkSize, fps);
-    $("send-status").textContent =
-      `Ready: ${prepared.totalFrames} frames (${fmtBytes(prepared.ciphertextBytes)} ciphertext). ` +
-      `Estimated loop time ${fmtTime(prepared.estSeconds)}.`;
+    const p = await sender.prepare(file, pass, chunkSize, fps);
     $("send-setup").classList.add("hidden");
     $("send-live").classList.remove("hidden");
     keepAwake(true);
-    sender.play();
+    sender.showHandshake();
+    $("send-status").textContent =
+      `${p.totalFrames} data frames ready (${fmtBytes(p.ciphertextBytes)} ciphertext). ` +
+      `Showing the session code — have the receiver scan it.`;
+    try {
+      await sender.startAckWatch($("ack-video"), $("ack-canvas"), ackFacing);
+    } catch (e) {
+      $("send-status").textContent =
+        `ACK camera unavailable (${e.message}) — the transfer can't advance without it. ` +
+        `Check camera permissions and reload.`;
+    }
   } catch (e) {
     $("send-status").textContent = `Error: ${e.message}`;
     $("btn-prepare").disabled = false;
@@ -88,45 +109,18 @@ $("btn-prepare").onclick = async () => {
 };
 
 $("btn-pause").onclick = () => {
-  if (sender.playing) { sender.stop(); $("btn-pause").textContent = "Resume"; }
+  if (sender.playing) { sender.stop(false); $("btn-pause").textContent = "Resume"; }
   else { sender.play(); $("btn-pause").textContent = "Pause"; }
 };
 
-let ackAbort = null;
-$("btn-scan-ack").onclick = async () => {
-  if (ackAbort) { ackAbort.abort(); return; }
-  ackAbort = new AbortController();
-  $("btn-scan-ack").textContent = "Stop ACK scan";
-  $("ack-cam-wrap").classList.remove("hidden");
-  sender.stop();
-  $("btn-pause").textContent = "Resume";
-
+$("btn-flip-cam").onclick = async () => {
+  ackFacing = ackFacing === "user" ? "environment" : "user";
   try {
-    const ack = await sender.scanAck($("ack-video"), $("ack-canvas"), ackAbort.signal);
-    if (ack) {
-      if (ack.status === ACK_COMPLETE) {
-        $("send-status").textContent = "Receiver confirmed: transfer complete.";
-        $("send-live").classList.add("done");
-      } else {
-        $("send-status").textContent = `Receiver is missing ${ack.missing.length} frame(s) — retransmitting only those.`;
-        sender.retransmit(ack.missing);
-        $("btn-pause").textContent = "Pause";
-      }
-    }
+    await sender.startAckWatch($("ack-video"), $("ack-canvas"), ackFacing);
+    $("send-status").textContent = `ACK camera: ${ackFacing === "user" ? "front" : "rear"}.`;
   } catch (e) {
     $("send-status").textContent = `Camera error: ${e.message}`;
-  } finally {
-    ackAbort = null;
-    $("btn-scan-ack").textContent = "Scan receiver's ACK";
-    $("ack-cam-wrap").classList.add("hidden");
   }
-};
-
-$("btn-full-loop").onclick = () => {
-  sender.playlist = sender.frames.map((_, i) => i);
-  sender.play();
-  $("btn-pause").textContent = "Pause";
-  $("send-status").textContent = "Looping the full frame sequence.";
 };
 
 // ═══════════════════════════════════════ RECEIVER ════════════════════════════
@@ -134,11 +128,11 @@ $("btn-full-loop").onclick = () => {
 const grid = $("frame-grid");
 let gridCells = [];
 
-// ── Scan heartbeat: proves the camera is locked on, even between new frames ──
+// ── Scan heartbeat ───────────────────────────────────────────────────────────
 const scan = { times: [], lastSeen: 0, lastForeign: 0, lastIdx: null, timer: null };
 
 function setScanPill(state, text) {
-  $("scan-dot").dataset.state = state;   // off | idle | live
+  $("scan-dot").dataset.state = state;
   $("scan-text").textContent = text;
 }
 
@@ -148,7 +142,6 @@ function scanHeartbeat(frameIdx) {
   scan.lastIdx = frameIdx;
   scan.times.push(now);
   while (scan.times.length && now - scan.times[0] > 3000) scan.times.shift();
-  // flash the viewfinder border on every capture
   const vf = document.querySelector("#panel-receive .viewfinder");
   if (vf) { vf.classList.remove("flash"); void vf.offsetWidth; vf.classList.add("flash"); }
 }
@@ -158,18 +151,57 @@ function startScanTicker() {
   scan.timer = setInterval(() => {
     if (!receiver.scanning) { setScanPill("off", "camera off"); return; }
     const now = Date.now();
-    const idle = now - scan.lastSeen;
-    if (scan.lastSeen !== 0 && idle <= 1500) {
+    if (scan.lastSeen !== 0 && now - scan.lastSeen <= 1500) {
       const rate = (scan.times.length / 3).toFixed(1);
       setScanPill("live", `locked on · frame #${scan.lastIdx} · ${rate}/s`);
     } else if (scan.lastForeign !== 0 && now - scan.lastForeign <= 1500) {
       setScanPill("idle", "QR detected but unreadable — move closer, hold steady");
     } else {
-      setScanPill("idle", "searching… align the camera with the sender's screen");
+      setScanPill("idle", receiver.phase === "handshake"
+        ? "searching for a session code…"
+        : "searching… align the camera with the sender's screen");
     }
   }, 400);
 }
 function stopScanTicker() { if (scan.timer) { clearInterval(scan.timer); scan.timer = null; } }
+
+// ── Auto-ACK cadence (TCP-style) ─────────────────────────────────────────────
+// The receiver's screen periodically shows the current ACK while its camera
+// keeps scanning. Triggers: right after START (READY), whenever no new frame
+// has arrived for a moment (window likely finished / stalled), and
+// persistently on COMPLETE.
+const ack = { timer: null, shownAt: 0, hideAt: 0 };
+const ACK_SHOW_MS = 4000;
+const ACK_MIN_GAP_MS = 6000;
+const IDLE_BEFORE_ACK_MS = 2500;
+
+function showAckOverlay(persist = false) {
+  if (!receiver.renderAckQR($("ack-out"))) return;
+  const wrap = $("ack-out-wrap");
+  wrap.classList.remove("hidden");
+  const miss = receiver.missingFrames.length;
+  $("ack-out-label").textContent = receiver.isComplete
+    ? "COMPLETE — the sender will stop automatically."
+    : miss === receiver.totalFrames
+      ? "READY — waiting for the first window."
+      : `ACK — have ${receiver.receivedCount}/${receiver.totalFrames}, requesting ${miss} missing.`;
+  ack.shownAt = Date.now();
+  ack.hideAt = persist ? Infinity : ack.shownAt + ACK_SHOW_MS;
+}
+
+function startAutoAck() {
+  stopAutoAck();
+  ack.timer = setInterval(() => {
+    const now = Date.now();
+    const wrap = $("ack-out-wrap");
+    if (!wrap.classList.contains("hidden") && now >= ack.hideAt) wrap.classList.add("hidden");
+    if (receiver.phase !== "receiving") return;
+    const idle = now - scan.lastSeen;
+    const sinceAck = now - ack.shownAt;
+    if (idle >= IDLE_BEFORE_ACK_MS && sinceAck >= ACK_MIN_GAP_MS) showAckOverlay();
+  }, 500);
+}
+function stopAutoAck() { if (ack.timer) { clearInterval(ack.timer); ack.timer = null; } }
 
 const receiver = new Receiver({
   onStatus: t => { $("recv-status").textContent = t; },
@@ -184,11 +216,17 @@ const receiver = new Receiver({
     $("build-bar").style.width = pct + "%";
   },
   onManifest: m => {
+    // SYN received — surface the session and ask for the passphrase.
+    $("session-card").classList.remove("hidden");
     $("recv-meta").textContent =
-      `${m.name} — ${fmtBytes(m.origSize)} original, ${m.totalFrames} frames @ ${m.chunkSize} B`;
+      `${m.name} — ${fmtBytes(m.origSize)}, ${m.totalFrames} frames @ ${m.chunkSize} B`;
+    $("recv-step-hint").textContent = "Step 2 — enter the passphrase the sender told you, then start.";
+    $("recv-status").textContent = "Session code scanned. Enter the passphrase to continue.";
+    $("recv-pass").focus();
+
     grid.innerHTML = "";
     gridCells = [];
-    const cap = Math.min(m.totalFrames, 2000); // visual cap; counts stay exact
+    const cap = Math.min(m.totalFrames, 2000);
     for (let i = 0; i < cap; i++) {
       const d = document.createElement("i");
       grid.appendChild(d);
@@ -206,23 +244,22 @@ const receiver = new Receiver({
     receiver.stop();
     stopScanTicker();
     setScanPill("live", "all frames captured");
-    $("recv-status").textContent = "All frames received. Show the ACK to the sender, then save the file.";
+    $("recv-status").textContent = "All frames received. The COMPLETE ACK is showing — the sender will stop. Now save the file.";
     $("btn-save").disabled = false;
-    $("btn-show-ack").click(); // auto-show COMPLETE ack
+    showAckOverlay(true); // persistent FIN
   },
 });
 
+// Step 1 — scan the session code (SYN). No passphrase needed yet.
 $("btn-start-scan").onclick = async () => {
-  const pass = $("recv-pass").value;
-  if (!pass) { $("recv-status").textContent = "Enter the sender's passphrase first."; return; }
   $("btn-start-scan").disabled = true;
   $("recv-live").classList.remove("hidden");
   keepAwake(true);
   try {
     await receiver.startScanning($("recv-video"), $("recv-canvas"));
     startScanTicker();
-    setScanPill("idle", "searching… align the camera with the sender's screen");
-    $("recv-status").textContent = "Scanning… aim the camera at the sender's screen.";
+    setScanPill("idle", "searching for a session code…");
+    $("recv-status").textContent = "Point the camera at the sender's session code.";
   } catch (e) {
     setScanPill("off", "camera unavailable");
     $("recv-status").textContent = `Camera error: ${e.message}`;
@@ -230,23 +267,29 @@ $("btn-start-scan").onclick = async () => {
   }
 };
 
-$("btn-show-ack").onclick = () => {
-  const wrap = $("ack-out-wrap");
-  if (receiver.renderAckQR($("ack-out"))) {
-    wrap.classList.remove("hidden");
-    const miss = receiver.missingFrames.length;
-    $("ack-out-label").textContent = receiver.isComplete
-      ? "COMPLETE — sender can stop."
-      : `Requesting ${miss} missing frame(s). Point this at the sender's camera.`;
-    // Hold, then return to scanning if not complete
-    setTimeout(() => {
-      wrap.classList.add("hidden");
-      if (!receiver.isComplete && !receiver.scanning) $("btn-start-scan").disabled = false;
-    }, 6000);
-  } else {
-    $("recv-status").textContent = "No session yet — scan at least one frame first.";
+// Step 2 — passphrase entered; answer READY (SYN-ACK) and receive.
+$("btn-begin").onclick = () => {
+  if (!$("recv-pass").value) {
+    $("recv-status").textContent = "Enter the passphrase first — you'll need it to decrypt the file.";
+    return;
   }
+  try {
+    receiver.beginReceiving();
+  } catch (e) {
+    $("recv-status").textContent = e.message;
+    return;
+  }
+  $("session-card").classList.add("hidden");
+  $("recv-transfer").classList.remove("hidden");
+  $("recv-step-hint").textContent =
+    "Step 3 — keep both screens facing each other's cameras. ACKs are exchanged automatically.";
+  $("recv-status").textContent = "READY sent. Receiving…";
+  showAckOverlay();   // SYN-ACK: tell the sender to start window 1
+  startAutoAck();
 };
+
+// Manual ACK (fallback if timing feels off)
+$("btn-show-ack").onclick = () => showAckOverlay(receiver.isComplete);
 
 $("btn-save").onclick = async () => {
   try {
@@ -262,6 +305,7 @@ $("btn-save").onclick = async () => {
     $("build-wrap").classList.add("ok");
     $("recv-status").textContent =
       `Saved ${out.name} (${fmtBytes(out.bytes.length)}). SHA-256 verified: ${out.sha256.slice(0, 16)}…`;
+    stopAutoAck();
     keepAwake(false);
   } catch (e) {
     $("build-wrap").classList.add("fail");
@@ -271,7 +315,7 @@ $("btn-save").onclick = async () => {
   }
 };
 
-// ── Secure-context check (camera won't exist over plain http) ───────────────
+// ── Secure-context check ─────────────────────────────────────────────────────
 if (!window.isSecureContext) {
   const warn = document.createElement("div");
   warn.className = "https-warn";
@@ -281,7 +325,7 @@ if (!window.isSecureContext) {
   document.querySelector("main").prepend(warn);
 }
 
-// ── PWA: offline after first load ────────────────────────────────────────────
+// ── PWA ──────────────────────────────────────────────────────────────────────
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("./sw.js").catch(() => { /* offline install is best-effort */ });
+  navigator.serviceWorker.register("./sw.js").catch(() => { /* best-effort */ });
 }

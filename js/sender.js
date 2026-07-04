@@ -1,30 +1,49 @@
-// sender.js — the transmit side.
-// file → compress → AES-256-GCM → chunk → Base45 frames → animated QR playback.
-// The only outbound channel is light from the screen.
+// sender.js — the transmit side, TCP-style over light.
+//
+// Phases:
+//   handshake — screen shows only Frame 0 (the manifest, i.e. the SYN).
+//               The receiver scans it, enters the passphrase, and answers
+//               with a READY ACK (the SYN-ACK).
+//   sending   — frames go out in windows of W. The sender's camera watches
+//               the receiver's screen continuously; every ACK carries the
+//               cumulative base + missing ranges (like TCP SACK), and the
+//               playlist becomes the first W still-missing frames.
+//   done      — a COMPLETE ACK (the FIN) stops the show.
+//
+// The screen never stops playing while the camera scans — display and
+// capture are independent, so ACKs need no mode switching.
 
 import { compress, encrypt, sha256hex } from "./crypto.js";
 import { openCamera } from "./camera.js";
 import {
-  MAGIC_DATA, encodeFrame, encodeManifest, decodeFrame, decodeAck,
-  MAGIC_ACK, ACK_COMPLETE,
+  MAGIC_DATA, MAGIC_ACK, encodeFrame, encodeManifest, decodeFrame, decodeAck,
+  ACK_COMPLETE, ACK_MISSING, ACK_READY,
 } from "./frame.js";
 
 /* global qrcode, jsQR */
 
+export const WINDOW_SIZE = 24; // frames per window before waiting on an ACK
+
 export class Sender {
   constructor(ui) {
-    this.ui = ui;           // callbacks: onStatus, onFrame, onProgress, onDone
-    this.frames = [];       // Base45 strings, index-aligned (0 = manifest)
-    this.qrCache = [];      // pre-rendered <canvas> per frame
-    this.playlist = [];     // indices currently being cycled
+    // ui callbacks: onStatus, onFrame, onPhase(phase, detail), onAck(ack)
+    this.ui = ui;
+    this.frames = [];
+    this.qrCache = [];
+    this.playlist = [0];
     this.sessionId = 0;
+    this.phase = "idle";     // idle | handshake | sending | done
     this.playing = false;
     this.fps = 2;
     this.timer = null;
     this.pos = 0;
+    this.ackStream = null;
+    this.ackWatching = false;
+    this._lastAckKey = "";
+    this._lastAckAt = 0;
   }
 
-  /** Run the full encode pipeline. Resolves when frames + QR canvases are ready. */
+  /** Full encode pipeline; resolves when all QR canvases are cached. */
   async prepare(file, passphrase, chunkSize, fps) {
     this.fps = fps;
     this.sessionId = crypto.getRandomValues(new Uint32Array(1))[0];
@@ -41,7 +60,7 @@ export class Sender {
 
     this.ui.onStatus("Chunking & encoding frames…");
     const total = Math.ceil(ciphertext.length / chunkSize);
-    if (total > 0xffffff) throw new Error("File needs more than 16.7M frames — reduce size or raise chunk size.");
+    if (total > 0xffffff) throw new Error("File needs more than 16.7M frames — raise the chunk size.");
 
     const manifest = encodeManifest({
       name: file.name, origSize: raw.length, compSize: compressed.length,
@@ -56,7 +75,7 @@ export class Sender {
       this.frames[i + 1] = encodeFrame(MAGIC_DATA, this.sessionId, i + 1, total, chunk);
       if (i % 200 === 0) {
         this.ui.onStatus(`Encoding frames… ${i}/${total}`);
-        await new Promise(r => setTimeout(r)); // keep UI responsive
+        await new Promise(r => setTimeout(r));
       }
     }
 
@@ -70,18 +89,14 @@ export class Sender {
       }
     }
 
-    this.playlist = this.frames.map((_, i) => i);
     return {
       sessionId: this.sessionId,
-      totalFrames: total + 1,
+      totalFrames: total,
       ciphertextBytes: ciphertext.length,
-      estSeconds: Math.ceil((total + 1) / this.fps),
     };
   }
 
   _renderQR(data) {
-    // Type 0 = auto-pick the smallest QR version that fits; ECC M balances
-    // density against camera-noise tolerance.
     const qr = qrcode(0, "M");
     qr.addData(data, "Alphanumeric");
     qr.make();
@@ -101,9 +116,56 @@ export class Sender {
     return canvas;
   }
 
-  /** Start (or restart) the animated loop over the current playlist. */
+  // ── Phase control ──────────────────────────────────────────────────────────
+
+  /** SYN: loop only the manifest frame until the receiver answers READY. */
+  showHandshake() {
+    this.phase = "handshake";
+    this.playlist = [0];
+    this.play();
+    this.ui.onPhase("handshake", "Waiting for the receiver to scan the session code…");
+  }
+
+  /** Apply an ACK from the receiver — the heart of the sliding window. */
+  _handleAck(ack) {
+    // Debounce: the receiver shows each ACK for a few seconds, so the
+    // camera decodes the same one repeatedly.
+    const key = JSON.stringify(ack);
+    const now = Date.now();
+    if (key === this._lastAckKey && now - this._lastAckAt < 2500) return;
+    this._lastAckKey = key;
+    this._lastAckAt = now;
+
+    this.ui.onAck?.(ack);
+
+    if (ack.status === ACK_COMPLETE) {
+      this.phase = "done";
+      this.stop();
+      this.ui.onPhase("done", "Receiver confirmed: all frames delivered.");
+      return;
+    }
+
+    if (ack.status === ACK_READY || ack.status === ACK_MISSING) {
+      // Window = the first W frames the receiver still lacks. A READY with
+      // no chunks yet means missing = [1..N], so the same rule covers both.
+      const missing = ack.missing.length
+        ? ack.missing
+        : Array.from({ length: this.frames.length - 1 }, (_, i) => i + 1);
+      const win = missing.filter(i => i >= 1 && i < this.frames.length).slice(0, WINDOW_SIZE);
+      if (win.length === 0) return;
+      this.phase = "sending";
+      this.playlist = win;
+      this.play();
+      const done = (this.frames.length - 1) - missing.length;
+      this.ui.onPhase("sending",
+        `Receiver has ${done}/${this.frames.length - 1} — sending window of ${win.length} (from frame ${win[0]}).`);
+    }
+  }
+
+  // ── Playback ───────────────────────────────────────────────────────────────
+
   play() {
-    this.stop();
+    this.stop(false);
     this.playing = true;
     this.pos = 0;
     const frameMs = 1000 / this.fps;
@@ -113,7 +175,6 @@ export class Sender {
       if (!this.playing) return;
       const idx = this.playlist[this.pos];
       this.ui.onFrame(this.qrCache[idx], idx, this.frames.length, this.pos, this.playlist.length);
-      // brief blank between frames to stop camera motion-blur blending
       this.timer = setTimeout(() => {
         if (!this.playing) return;
         this.ui.onFrame(null, idx, this.frames.length, this.pos, this.playlist.length);
@@ -126,55 +187,71 @@ export class Sender {
     tick();
   }
 
-  stop() {
+  stop(stopAckWatch = true) {
     this.playing = false;
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    if (stopAckWatch) this.stopAckWatch();
   }
 
-  /** Narrow the playlist to only the frames the receiver reported missing. */
-  retransmit(missing) {
-    const valid = missing.filter(i => i >= 0 && i < this.frames.length);
-    if (valid.length === 0) return false;
-    this.playlist = [0, ...valid.filter(i => i !== 0)]; // always resend manifest
-    this.play();
-    return true;
-  }
+  // ── Continuous ACK watch (runs alongside playback) ─────────────────────────
 
   /**
-   * Open the camera and watch for an ACK QR from the receiver's screen.
-   * Resolves { status, missing } once a valid ACK for this session is seen.
+   * Open a camera and keep decoding ACK QRs for the whole session.
+   * With the phones facing each other, the sender's FRONT camera sees the
+   * receiver's screen while the sender's own screen keeps playing frames.
    */
-  async scanAck(videoEl, canvasEl, signal) {
-    const stream = await openCamera({
-      video: { facingMode: "environment" }, audio: false,
-    });
-    videoEl.srcObject = stream;
+  async startAckWatch(videoEl, canvasEl, facingMode = "user") {
+    this.stopAckWatch();
+    this.ackStream = await openCamera({ video: { facingMode }, audio: false });
+    videoEl.srcObject = this.ackStream;
     await videoEl.play();
+    this.ackWatching = true;
     const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
 
-    try {
-      while (!signal.aborted) {
-        if (videoEl.readyState === videoEl.HAVE_ENOUGH_DATA) {
-          canvasEl.width = videoEl.videoWidth;
-          canvasEl.height = videoEl.videoHeight;
-          ctx.drawImage(videoEl, 0, 0);
+    let detector = null;
+    if ("BarcodeDetector" in window) {
+      try {
+        const formats = await BarcodeDetector.getSupportedFormats();
+        if (formats.includes("qr_code"))
+          detector = new BarcodeDetector({ formats: ["qr_code"] });
+      } catch { /* jsQR below */ }
+    }
+
+    const loop = async () => {
+      if (!this.ackWatching) return;
+      if (videoEl.readyState === videoEl.HAVE_ENOUGH_DATA) {
+        canvasEl.width = videoEl.videoWidth;
+        canvasEl.height = videoEl.videoHeight;
+        ctx.drawImage(videoEl, 0, 0);
+        let text = null;
+        if (detector) {
+          try {
+            const codes = await detector.detect(canvasEl);
+            if (codes.length) text = codes[0].rawValue;
+          } catch { /* transient */ }
+        }
+        if (text === null) {
           const img = ctx.getImageData(0, 0, canvasEl.width, canvasEl.height);
           const code = jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
-          if (code) {
-            const frame = decodeFrame(code.data);
-            if (frame && frame.magic === MAGIC_ACK && frame.sessionId === this.sessionId) {
-              return decodeAck(frame.payload);
-            }
+          if (code) text = code.data;
+        }
+        if (text !== null) {
+          const frame = decodeFrame(text);
+          if (frame && frame.magic === MAGIC_ACK && frame.sessionId === this.sessionId) {
+            this._handleAck(decodeAck(frame.payload));
           }
         }
-        await new Promise(r => setTimeout(r, 120));
       }
-      return null;
-    } finally {
-      stream.getTracks().forEach(t => t.stop());
-      videoEl.srcObject = null;
+      setTimeout(loop, 150);
+    };
+    loop();
+  }
+
+  stopAckWatch() {
+    this.ackWatching = false;
+    if (this.ackStream) {
+      this.ackStream.getTracks().forEach(t => t.stop());
+      this.ackStream = null;
     }
   }
 }
-
-export { ACK_COMPLETE };
