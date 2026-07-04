@@ -134,8 +134,51 @@ $("btn-full-loop").onclick = () => {
 const grid = $("frame-grid");
 let gridCells = [];
 
+// ── Scan heartbeat: proves the camera is locked on, even between new frames ──
+const scan = { times: [], lastSeen: 0, lastIdx: null, timer: null };
+
+function setScanPill(state, text) {
+  $("scan-dot").dataset.state = state;   // off | idle | live
+  $("scan-text").textContent = text;
+}
+
+function scanHeartbeat(frameIdx) {
+  const now = Date.now();
+  scan.lastSeen = now;
+  scan.lastIdx = frameIdx;
+  scan.times.push(now);
+  while (scan.times.length && now - scan.times[0] > 3000) scan.times.shift();
+  // flash the viewfinder border on every capture
+  const vf = document.querySelector("#panel-receive .viewfinder");
+  if (vf) { vf.classList.remove("flash"); void vf.offsetWidth; vf.classList.add("flash"); }
+}
+
+function startScanTicker() {
+  stopScanTicker();
+  scan.timer = setInterval(() => {
+    if (!receiver.scanning) { setScanPill("off", "camera off"); return; }
+    const idle = Date.now() - scan.lastSeen;
+    if (scan.lastSeen === 0 || idle > 1500) {
+      setScanPill("idle", "searching… align the camera with the sender's screen");
+    } else {
+      const rate = (scan.times.length / 3).toFixed(1);
+      setScanPill("live", `locked on · frame #${scan.lastIdx} · ${rate}/s`);
+    }
+  }, 400);
+}
+function stopScanTicker() { if (scan.timer) { clearInterval(scan.timer); scan.timer = null; } }
+
 const receiver = new Receiver({
   onStatus: t => { $("recv-status").textContent = t; },
+  onSignal: idx => scanHeartbeat(idx),
+  onBuild: (label, pct) => {
+    const w = $("build-wrap");
+    w.classList.remove("hidden");
+    if (pct === 0) w.classList.remove("ok", "fail");
+    $("build-label").textContent = label;
+    $("build-pct").textContent = Math.round(pct) + "%";
+    $("build-bar").style.width = pct + "%";
+  },
   onManifest: m => {
     $("recv-meta").textContent =
       `${m.name} — ${fmtBytes(m.origSize)} original, ${m.totalFrames} frames @ ${m.chunkSize} B`;
@@ -157,6 +200,8 @@ const receiver = new Receiver({
   },
   onComplete: () => {
     receiver.stop();
+    stopScanTicker();
+    setScanPill("live", "all frames captured");
     $("recv-status").textContent = "All frames received. Show the ACK to the sender, then save the file.";
     $("btn-save").disabled = false;
     $("btn-show-ack").click(); // auto-show COMPLETE ack
@@ -171,8 +216,11 @@ $("btn-start-scan").onclick = async () => {
   keepAwake(true);
   try {
     await receiver.startScanning($("recv-video"), $("recv-canvas"));
+    startScanTicker();
+    setScanPill("idle", "searching… align the camera with the sender's screen");
     $("recv-status").textContent = "Scanning… aim the camera at the sender's screen.";
   } catch (e) {
+    setScanPill("off", "camera unavailable");
     $("recv-status").textContent = `Camera error: ${e.message}`;
     $("btn-start-scan").disabled = false;
   }
@@ -206,10 +254,14 @@ $("btn-save").onclick = async () => {
     a.download = out.name;
     a.click();
     URL.revokeObjectURL(a.href);
+    $("build-label").textContent = `Saved ${out.name}`;
+    $("build-wrap").classList.add("ok");
     $("recv-status").textContent =
       `Saved ${out.name} (${fmtBytes(out.bytes.length)}). SHA-256 verified: ${out.sha256.slice(0, 16)}…`;
     keepAwake(false);
   } catch (e) {
+    $("build-wrap").classList.add("fail");
+    $("build-label").textContent = "Build failed";
     $("recv-status").textContent = e.message;
     $("btn-save").disabled = false;
   }

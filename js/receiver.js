@@ -82,6 +82,11 @@ export class Receiver {
     if (this.sessionId === null) this.sessionId = frame.sessionId;
     if (frame.sessionId !== this.sessionId) return;
 
+    // Heartbeat: fires for EVERY valid frame of this session, duplicates
+    // included — it tells the UI "the camera is locked on", which is
+    // distinct from "we learned something new".
+    this.ui.onSignal?.(frame.frameIndex);
+
     if (frame.frameIndex === 0) {
       if (!this.manifest) {
         this.manifest = decodeManifest(frame.payload);
@@ -118,23 +123,34 @@ export class Receiver {
     return true;
   }
 
-  /** Reassemble, decrypt, decompress, verify, and hand back a downloadable file. */
+  /**
+   * Reassemble, decrypt, decompress, verify, and hand back a downloadable file.
+   * Reports staged progress via ui.onBuild(label, pct):
+   * reassemble 0→40 (real per-chunk progress), decrypt →70,
+   * decompress →85, verify →95, done 100.
+   */
   async assemble(passphrase) {
     if (!this.isComplete) throw new Error("Transfer incomplete — frames still missing.");
     const m = this.manifest;
+    const build = (label, pct) => { this.ui.onBuild?.(label, pct); this.ui.onStatus(label); };
 
-    this.ui.onStatus("Reassembling chunks…");
+    build("Reassembling chunks…", 0);
     const ciphertext = new Uint8Array(
       [...this.chunks.keys()].reduce((n, k) => n + this.chunks.get(k).length, 0)
     );
     let off = 0;
+    const yieldEvery = Math.max(1, Math.floor(this.totalFrames / 20));
     for (let i = 1; i <= this.totalFrames; i++) {
       const c = this.chunks.get(i);
       ciphertext.set(c, off);
       off += c.length;
+      if (i % yieldEvery === 0) {
+        build(`Reassembling chunks… ${i} / ${this.totalFrames}`, (i / this.totalFrames) * 40);
+        await new Promise(r => setTimeout(r)); // let the progress bar paint
+      }
     }
 
-    this.ui.onStatus("Decrypting (AES-256-GCM)…");
+    build("Decrypting (AES-256-GCM)…", 45);
     let compressed;
     try {
       compressed = await decrypt(ciphertext, passphrase, m.salt, m.nonce);
@@ -142,14 +158,15 @@ export class Receiver {
       throw new Error("Decryption failed — wrong passphrase or corrupted data. Nothing was saved.");
     }
 
-    this.ui.onStatus("Decompressing…");
+    build("Decompressing…", 70);
     const plain = await decompress(compressed, m.compAlgo);
 
-    this.ui.onStatus("Verifying SHA-256…");
+    build("Verifying SHA-256…", 85);
     const digest = await sha256hex(plain);
     if (digest !== m.sha256)
       throw new Error("Integrity check failed — SHA-256 mismatch. Nothing was saved.");
 
+    build("Build complete", 100);
     return { name: m.name, bytes: plain, sha256: digest };
   }
 }

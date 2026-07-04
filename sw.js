@@ -2,7 +2,7 @@
 // load so every subsequent use works fully offline: both devices can be in
 // airplane mode and the transfer still runs end to end.
 
-const CACHE = "qrfb-v2";
+const CACHE = "qrfb-v3";
 
 const ASSETS = [
   "./",

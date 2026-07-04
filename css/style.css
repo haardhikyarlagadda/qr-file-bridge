@@ -358,3 +358,70 @@ footer .mono { font-size: 0.7rem; color: var(--text-dim); letter-spacing: 0.02em
   font-size: 0.88rem;
   margin-bottom: 18px;
 }
+
+/* ── Scan heartbeat pill ────────────────────────────────────────────── */
+
+.scan-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 6px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.scan-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--line);
+  flex: none;
+}
+.scan-dot[data-state="idle"] {
+  background: var(--amber);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.scan-dot[data-state="live"] {
+  background: var(--ok);
+  animation: pulse 0.6s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scan-dot { animation: none !important; }
+}
+
+/* capture flash on the viewfinder each time a frame decodes */
+.viewfinder.flash { animation: vf-flash 0.25s ease-out; }
+@keyframes vf-flash {
+  0%   { border-color: var(--ok); opacity: 1; }
+  100% { border-color: var(--cyan); opacity: 0.85; }
+}
+
+/* ── Build progress ─────────────────────────────────────────────────── */
+
+.build {
+  margin-top: 14px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.build-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.build-fill { transition: width 0.25s ease; }
+.build.ok .build-fill   { background: var(--ok); }
+.build.ok .build-head   { color: var(--ok); }
+.build.fail .build-fill { background: var(--err); }
+.build.fail .build-head { color: var(--err); }
