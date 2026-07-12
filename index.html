@@ -3,205 +3,663 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>QR File Bridge — optical file transfer</title>
-<meta name="description" content="Transfer files between any two devices using only a screen and a camera. No network, no cables, no accounts.">
-<link rel="manifest" href="manifest.webmanifest">
-<meta name="theme-color" content="#10141F">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/style.css">
+<title>QR File Bridge</title>
+<!-- ONE file. Handshake (step 1) + capacity ladder (step 2) proved the
+     channel on-device up to 3300 chars/frame. Step 3 (this): real file
+     transfer built on exactly those primitives.
+     Duplex model: BOTH cameras stay live. Sender screen = data frames.
+     Receiver screen = its current ACK, always. No mode switching. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
-<script type="module">
-// iOS Safari has no native BarcodeDetector, and jsQR struggles with dense
-// screen-to-camera codes. Polyfill with a WebAssembly build of ZXing —
-// near-native decode quality. The app awaits window.__bdReady before
-// creating a detector so there's no startup race.
-window.__bdReady = (async () => {
-  if (!("BarcodeDetector" in window)) {
-    try {
-      await import("https://cdn.jsdelivr.net/npm/barcode-detector@2/dist/es/side-effects.min.js");
-    } catch { /* offline or blocked — jsQR fallback still works */ }
-  }
-})();
-</script>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif;
+         background: #10141F; color: #E8ECF4; min-height: 100dvh;
+         padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  h1 { font-size: 1.15rem; }
+  .sub { color: #8B96AB; font-size: 0.82rem; }
+  button, select { font: inherit; border-radius: 10px; }
+  button { font-weight: 600; border: none; padding: 14px; width: 100%; cursor: pointer; margin-top: 8px; }
+  select, input[type="password"] { width: 100%; padding: 10px; background: #1A2130; color: #E8ECF4;
+           border: 1px solid #2E3A52; margin-top: 4px; border-radius: 10px; font: inherit; }
+  .steps { background: #1A2130; border: 1px solid #2E3A52; border-radius: 12px;
+           padding: 12px 14px 12px 30px; margin-top: 10px; font-size: 0.85rem; color: #B9C2D4; }
+  .steps li { margin: 6px 0; }
+  .steps b { color: #E8ECF4; }
+  label { font-size: 0.8rem; color: #8B96AB; display: block; margin-top: 10px; }
+  .amber { background: #FFB224; color: #10141F; }
+  .cyan  { background: #4AD6E0; color: #10141F; }
+  .ghost { background: transparent; color: #E8ECF4; border: 1px solid #2E3A52; }
+  .hidden { display: none !important; }
+  #qr-box { background: #fff; border-radius: 12px; padding: 10px;
+            display: flex; justify-content: center; }
+  #qr-box canvas { width: min(86vw, 50vh); height: auto; image-rendering: pixelated; }
+  video { width: 100%; border-radius: 12px; background: #000; max-height: 34vh; object-fit: cover; }
+  .state { font-family: ui-monospace, monospace; font-size: 0.85rem; padding: 10px 12px;
+           border-radius: 10px; background: #1A2130; border: 1px solid #2E3A52; }
+  .state.good { border-color: #5CD879; color: #5CD879; }
+  .state.wait { border-color: #FFB224; color: #FFB224; }
+  .bar-track { height: 10px; background: #222B3E; border-radius: 99px; overflow: hidden; margin-top: 10px; }
+  .bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #4AD6E0, #7BE8F0);
+              border-radius: 99px; transition: width .2s; }
+  .file-drop { display: block; border: 1.5px dashed #2E3A52; border-radius: 12px;
+               background: #1A2130; padding: 22px 14px; text-align: center;
+               color: #8B96AB; margin-top: 10px; }
+  .file-drop input { display: none; }
+  #log { font-family: ui-monospace, monospace; font-size: 0.68rem; color: #8B96AB;
+         white-space: pre-wrap; word-break: break-all; background: #0C0F17;
+         border-radius: 10px; padding: 10px; flex: 1; overflow-y: auto; min-height: 70px; }
+  .done { text-align: center; padding: 18px 12px; border: 2px solid #5CD879; border-radius: 14px; }
+  .done .big { font-size: 1.8rem; }
+  .mono { font-family: ui-monospace, monospace; }
+</style>
 </head>
-<body data-mode="home">
+<body>
 
-<header>
-  <div class="wordmark">
-    <span class="glyph" aria-hidden="true"></span>
-    <h1>QR&nbsp;File&nbsp;Bridge</h1>
+<h1>QR File Bridge</h1>
+<p class="sub" id="decoder-line">decoder: checking…</p>
+
+<div id="pick">
+  <p class="sub">Transfer a file between two phones using only screens and cameras. No network is used during the transfer.</p>
+  <ol class="steps">
+    <li><b>Both phones:</b> open this page (needs HTTPS the first time).</li>
+    <li><b>Phone with the file:</b> tap <b>SEND a file</b> below.</li>
+    <li><b>Other phone:</b> tap <b>RECEIVE a file</b> below.</li>
+    <li>Follow the instructions on each screen — then hold the phones <b>facing each other, 15–25 cm apart</b>, so each camera sees the other screen. The transfer runs by itself.</li>
+  </ol>
+  <button class="amber" id="btn-send">SEND a file</button>
+  <button class="cyan"  id="btn-receive">RECEIVE a file</button>
+</div>
+
+<!-- sender setup -->
+<div id="send-setup" class="hidden">
+  <ol class="steps">
+    <li>Choose a file — <b>up to 1 MB</b> (documents, photos, keys, configs).</li>
+    <li><b>Optional:</b> set a passphrase to encrypt the file (AES-256). Tell it to the receiver <b>out loud</b> — they must type the same one. Leave empty for an unencrypted transfer.</li>
+    <li>Keep the default density &amp; speed unless transfers fail.</li>
+    <li>Tap <b>Start sending</b>, then have the receiver scan the code that appears.</li>
+  </ol>
+  <label class="file-drop"><input type="file" id="file"><span id="file-label">Tap to choose a file (max 1 MB)</span></label>
+  <label>Passphrase — optional, encrypts the file
+    <input type="password" id="send-pass" autocomplete="off" placeholder="leave empty for no encryption">
+  </label>
+  <label>Frame density (your devices passed 3300 — Max uses margin below that)
+    <select id="density">
+      <option value="550">Small — 550 chars ≈ 355 B/frame</option>
+      <option value="1100">Medium — 1100 chars ≈ 719 B/frame</option>
+      <option value="2000" selected>Large — 2000 chars ≈ 1318 B/frame</option>
+      <option value="2600">Max — 2600 chars ≈ 1719 B/frame</option>
+    </select>
+  </label>
+  <label>Frame rate
+    <select id="fps">
+      <option value="2" selected>2 fps — reliable default</option>
+      <option value="3">3 fps</option>
+      <option value="4">4 fps</option>
+      <option value="5">5 fps — good light only</option>
+    </select>
+  </label>
+  <button class="amber" id="btn-start-send" disabled>Start sending</button>
+  <button class="ghost" id="btn-back1">Back</button>
+</div>
+
+<!-- receiver setup -->
+<div id="recv-setup" class="hidden">
+  <ol class="steps">
+    <li>If the sender set a passphrase, type <b>exactly the same one</b> below. If they didn't, leave it empty.</li>
+    <li>Tap <b>Start scanning</b> — your camera opens.</li>
+    <li>Point the camera at the QR code on the sender's screen.</li>
+    <li>Once joined, hold the phones facing each other and <b>don't move them</b> until you see the green success screen. The file is verified before saving.</li>
+  </ol>
+  <label>Passphrase — only if the sender set one
+    <input type="password" id="recv-pass" autocomplete="off" placeholder="leave empty if no passphrase">
+  </label>
+  <button class="cyan" id="btn-start-receive">Start scanning</button>
+  <button class="ghost" id="btn-back2">Back</button>
+</div>
+
+<!-- shared live stage -->
+<div id="stage" class="hidden">
+  <div class="state wait" id="state">…</div>
+  <div id="qr-box" class="hidden" style="margin-top:10px"><canvas id="qr"></canvas></div>
+  <video id="cam" playsinline muted class="hidden" style="margin-top:10px"></video>
+  <div class="bar-track hidden" id="bar-wrap"><div class="bar-fill" id="bar"></div></div>
+  <p class="sub mono" id="counts" style="margin-top:6px"></p>
+  <p class="sub mono" id="scan-counter"></p>
+  <button class="ghost" id="btn-flip">Switch camera (rear ⇄ front)</button>
+  <button class="ghost" id="btn-reset">Start over</button>
+</div>
+
+<div id="success" class="done hidden">
+  <div class="big">✅</div>
+  <div id="success-title"></div>
+  <p class="sub mono" id="success-note" style="margin-top:6px"></p>
+  <div id="retry-wrap" class="hidden" style="text-align:left">
+    <label>Passphrase
+      <input type="password" id="retry-pass" autocomplete="off" placeholder="enter the sender's passphrase">
+    </label>
+    <button class="cyan" id="btn-retry-decrypt">Try decrypting again</button>
   </div>
-  <p class="tagline">screen&nbsp;→&nbsp;light&nbsp;→&nbsp;camera. nothing else.</p>
-</header>
+  <button class="cyan hidden" id="btn-save">Save file</button>
+  <button class="ghost" id="btn-again">New transfer</button>
+</div>
 
-<main>
+<pre id="log"></pre>
+<canvas id="work" class="hidden"></canvas>
 
-  <!-- ── HOME ─────────────────────────────────────────────────────────── -->
-  <section id="panel-home" class="panel active">
-    <p class="lede">
-      Move a file between any two devices using only a screen and a camera.
-      The file is encrypted, cut into chunks, and played as an animated QR
-      sequence. No network protocol is used at any point — both devices can
-      be in airplane mode.
-    </p>
-    <div class="mode-choice">
-      <button id="btn-mode-send" class="mode-card send">
-        <span class="mode-kicker">this device has the file</span>
-        <span class="mode-title">Send</span>
-        <span class="mode-desc">Encrypt, chunk, and play the QR sequence on this screen.</span>
-      </button>
-      <button id="btn-mode-receive" class="mode-card receive">
-        <span class="mode-kicker">this device has the camera</span>
-        <span class="mode-title">Receive</span>
-        <span class="mode-desc">Scan the sender's screen and rebuild the file here.</span>
-      </button>
-    </div>
-    <details class="how">
-      <summary>How the optical channel works</summary>
-      <ol>
-        <li><strong>Handshake:</strong> the sender shows a session code (the manifest — filename, frame count, crypto parameters). The receiver scans it, then enters the shared passphrase and answers with a READY code — like a TCP SYN / SYN-ACK, but in light.</li>
-        <li>The sender compresses and AES-256-GCM-encrypts the file, splits the ciphertext into chunks, and sends them as QR frames in windows of 24.</li>
-        <li>The receiver's screen automatically shows acknowledgement codes carrying which frames arrived and which are missing; the sender's camera reads them and sends the next window — or resends just the missing frames.</li>
-        <li>When everything has arrived, the receiver shows a COMPLETE code, the sender stops, and the receiver decrypts, verifies the SHA-256, and saves. A wrong passphrase or corrupted transfer saves nothing.</li>
-      </ol>
-    </details>
-  </section>
+<script>
+"use strict";
+// ─────────────────────────────────────────────────────────────────────────────
+// Wire protocol — QR alphanumeric charset only; '.' delimits header fields;
+// binary rides as Base45 in the final positional field (may contain dots).
+//
+//   SYN       QH1.S.<sid>                          sender screen
+//   READY     QH1.A.<sid>                          receiver screen
+//   MANIFEST  QH1.M.<sid>.<total5>.<size8hex>.<sha64>.<nameB45><CK4>
+//   DATA      QH1.F.<sid>.<idx5>.<b45data><CK4>    idx is 1-based
+//   ACK       QH1.R.<sid>.M.<missing ranges a-b/c/d-e><CK4>   (receiver screen, live)
+//   DONE      QH1.R.<sid>.K                        receiver screen, persistent
+// ─────────────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const log = (m) => {
+  const t = new Date().toTimeString().slice(0, 8);
+  $("log").textContent = `[${t}] ${m}\n` + $("log").textContent.slice(0, 12000);
+};
+const setState = (cls, text) => { const s = $("state"); s.className = "state " + cls; s.textContent = text; };
+const fmtB = n => n < 1024 ? n + " B" : n < 1048576 ? (n/1024).toFixed(1) + " KB" : (n/1048576).toFixed(2) + " MB";
 
-  <!-- ── SEND ─────────────────────────────────────────────────────────── -->
-  <section id="panel-send" class="panel">
-    <button class="btn-back">← back</button>
-    <h2 class="role-title send">Send</h2>
+if (!window.isSecureContext) log("NOT HTTPS — camera will be unavailable on iPhone.");
 
-    <div id="send-setup">
-      <label class="file-drop">
-        <input type="file" id="send-file">
-        <span id="send-file-label">Choose a file</span>
-      </label>
+// ── Base45 (ported from legacy/js/base45.js — protocol-tested) ──────────────
+const B45A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+const B45R = Object.fromEntries([...B45A].map((c, i) => [c, i]));
+function b45encode(bytes) {
+  let out = "";
+  const n = bytes.length;
+  for (let i = 0; i + 1 < n; i += 2) {
+    const v = bytes[i] * 256 + bytes[i + 1];
+    out += B45A[v % 45] + B45A[((v / 45) | 0) % 45] + B45A[(v / 2025) | 0];
+  }
+  if (n % 2 === 1) {
+    const v = bytes[n - 1];
+    out += B45A[v % 45] + B45A[(v / 45) | 0];
+  }
+  return out;
+}
+function b45decode(str) {
+  const len = str.length;
+  if (len % 3 === 1) throw new Error("Base45 length");
+  const out = new Uint8Array(((len / 3) | 0) * 2 + (len % 3 === 2 ? 1 : 0));
+  let o = 0;
+  for (let i = 0; i + 3 <= len; i += 3) {
+    const c = B45R[str[i]], d = B45R[str[i+1]], e = B45R[str[i+2]];
+    if (c === undefined || d === undefined || e === undefined) throw new Error("Base45 char");
+    const v = c + d * 45 + e * 2025;
+    if (v > 65535) throw new Error("Base45 overflow");
+    out[o++] = v >> 8; out[o++] = v & 0xff;
+  }
+  if (len % 3 === 2) {
+    const c = B45R[str[len-2]], d = B45R[str[len-1]];
+    if (c === undefined || d === undefined) throw new Error("Base45 char");
+    const v = c + d * 45;
+    if (v > 255) throw new Error("Base45 overflow");
+    out[o++] = v;
+  }
+  return out;
+}
+function checksum4(s) {
+  let a = 0;
+  for (let i = 0; i < s.length; i++) a = (a * 31 + s.charCodeAt(i)) & 0xffff;
+  return a.toString(16).padStart(4, "0").toUpperCase();
+}
+async function sha256hex(bytes) {
+  const d = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+}
 
-      <label class="field">
-        <span>Passphrase <em>(share it with the receiver out loud — never in a QR)</em></span>
-        <input type="password" id="send-pass" autocomplete="off" placeholder="e.g. correct-horse-battery">
-      </label>
+// ── AES-256-GCM (ported from legacy/js/crypto.js — protocol-tested) ─────────
+const hex = u8 => [...u8].map(b => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+const unhex = s => new Uint8Array(s.match(/../g).map(h => parseInt(h, 16)));
+async function deriveKey(passphrase, salt) {
+  const material = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(passphrase), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+    material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+async function encryptBytes(plain, passphrase) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(passphrase, salt);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, plain));
+  return { ct, salt, nonce };
+}
+async function decryptBytes(ct, passphrase, salt, nonce) {
+  const key = await deriveKey(passphrase, salt);
+  // throws on wrong passphrase / tampering (GCM auth tag)
+  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, key, ct));
+}
+// ranges: "1-40/55/71-90" ('/' and '-' are QR-alphanumeric; ',' is not)
+function toRanges(sorted) {
+  const parts = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const start = sorted[i]; let end = start;
+    while (i + 1 < sorted.length && sorted[i+1] === end + 1) end = sorted[++i];
+    parts.push(start === end ? `${start}` : `${start}-${end}`);
+  }
+  return parts.join("/");
+}
+function fromRanges(str) {
+  const out = [];
+  if (!str) return out;
+  for (const p of str.split("/")) {
+    const [s, e] = p.split("-").map(Number);
+    if (Number.isNaN(s)) continue;
+    if (e === undefined) out.push(s);
+    else for (let i = s; i <= e; i++) out.push(i);
+  }
+  return out;
+}
 
-      <div class="field-row">
-        <label class="field">
-          <span>Chunk size</span>
-          <select id="send-chunk">
-            <option value="100">100 B — hardest conditions</option>
-            <option value="200" selected>200 B — default, most reliable</option>
-            <option value="400">400 B — good camera, close range</option>
-            <option value="800">800 B — ideal conditions only</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Frame rate</span>
-          <select id="send-fps">
-            <option value="1">1 fps — most reliable</option>
-            <option value="2" selected>2 fps — default</option>
-            <option value="4">4 fps — fast cameras</option>
-            <option value="6">6 fps — desktop webcams</option>
-          </select>
-        </label>
-      </div>
+// ── Decoder ──────────────────────────────────────────────────────────────────
+let detector = null;
+const decoderReady = (async () => {
+  let name = "jsQR (fallback)";
+  try {
+    if (!("BarcodeDetector" in window))
+      await import("https://cdn.jsdelivr.net/npm/barcode-detector@2/dist/es/side-effects.min.js");
+    if ("BarcodeDetector" in window) {
+      const formats = await BarcodeDetector.getSupportedFormats();
+      if (formats.includes("qr_code")) {
+        detector = new BarcodeDetector({ formats: ["qr_code"] });
+        const warm = document.createElement("canvas"); warm.width = warm.height = 40;
+        await detector.detect(warm);
+        name = "BarcodeDetector/ZXing";
+      }
+    }
+  } catch (e) { log("polyfill failed: " + e.message); }
+  $("decoder-line").textContent = "decoder: " + name;
+  log("decoder ready: " + name);
+})();
 
-      <button id="btn-prepare" class="btn-primary" disabled>Encrypt &amp; start transmitting</button>
-    </div>
+// ── QR display ───────────────────────────────────────────────────────────────
+function showQR(text) {
+  const qr = qrcode(0, "M");
+  qr.addData(text, "Alphanumeric");
+  qr.make();
+  const m = qr.getModuleCount();
+  const scale = Math.max(2, Math.floor(760 / (m + 8)));
+  const quiet = 4 * scale;
+  const size = m * scale + quiet * 2;
+  const cv = $("qr");
+  cv.width = cv.height = size;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = "#000";
+  for (let r = 0; r < m; r++) for (let c = 0; c < m; c++)
+    if (qr.isDark(r, c)) ctx.fillRect(quiet + c * scale, quiet + r * scale, scale, scale);
+  $("qr-box").classList.remove("hidden");
+}
+function blankQR() {
+  const cv = $("qr"), ctx = cv.getContext("2d");
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+}
 
-    <div id="send-live" class="hidden">
-      <div id="send-phase" class="phase-badge mono">handshake — waiting for receiver</div>
-      <div id="qr-stage" aria-label="Animated QR sequence"></div>
-      <div class="hud">
-        <span id="send-frame-label" class="mono">frame 0 / 0</span>
-        <span id="send-loop-label" class="mono">slot 0 of 0</span>
-      </div>
-      <div class="btn-row">
-        <button id="btn-pause" class="btn-ghost">Pause</button>
-        <button id="btn-flip-cam" class="btn-ghost">Flip ACK camera</button>
-      </div>
-      <div id="ack-cam-wrap" class="cam-wrap small">
-        <video id="ack-video" playsinline muted></video>
-        <canvas id="ack-canvas" class="hidden"></canvas>
-        <p class="hint">This camera watches for the receiver's ACK codes — keep the receiver's screen in view. With phones facing each other, the front camera does this automatically.</p>
-      </div>
-    </div>
+// ── Camera + scan loop ───────────────────────────────────────────────────────
+let stream = null, scanning = false, facing = "environment";
+async function startCamera() {
+  if (stream) return;
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error("camera API unavailable");
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    audio: false,
+  });
+  const v = $("cam");
+  v.srcObject = stream;
+  v.classList.remove("hidden");
+  await v.play();
+  log(`camera on (${facing}): ${v.videoWidth}×${v.videoHeight}`);
+}
+async function flipCamera() {
+  // Swap the stream in place — the scan loop keeps reading the same <video>.
+  facing = facing === "environment" ? "user" : "environment";
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  try { await startCamera(); }
+  catch (e) {
+    log("flip failed (" + e.message + ") — reverting");
+    facing = facing === "environment" ? "user" : "environment";
+    stream = null;
+    try { await startCamera(); } catch {}
+  }
+}
+$("btn-flip").onclick = flipCamera;
+function stopAll() {
+  scanning = false;
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  clearInterval(playTimer); clearInterval(ackTimer);
+}
+let scanCount = 0;      // every QR successfully decoded, duplicates included
+async function scanLoop(onText) {
+  await decoderReady;
+  scanning = true;
+  const v = $("cam"), work = $("work");
+  const ctx = work.getContext("2d", { willReadFrequently: true });
+  const tick = async () => {
+    if (!scanning) return;
+    if (v.readyState === v.HAVE_ENOUGH_DATA) {
+      work.width = v.videoWidth; work.height = v.videoHeight;
+      ctx.drawImage(v, 0, 0);
+      let text = null;
+      if (detector) {
+        try {
+          const codes = await detector.detect(work);
+          if (codes.length) text = codes[0].rawValue;
+        } catch {}
+      }
+      if (text === null && typeof jsQR === "function") {
+        const img = ctx.getImageData(0, 0, work.width, work.height);
+        const c = jsQR(img.data, work.width, work.height, { inversionAttempts: "dontInvert" });
+        if (c) text = c.data;
+      }
+      if (text !== null) { scanCount++; onText(text); }
+    }
+    setTimeout(tick, 100);
+  };
+  tick();
+}
 
-    <p id="send-status" class="status" role="status"></p>
-  </section>
+// ── Shared session bits ──────────────────────────────────────────────────────
+const rand4 = () => Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0").toUpperCase();
+let sid = null, playTimer = null, ackTimer = null;
+const te = new TextEncoder(), td = new TextDecoder();
 
-  <!-- ── RECEIVE ──────────────────────────────────────────────────────── -->
-  <section id="panel-receive" class="panel">
-    <button class="btn-back">← back</button>
-    <h2 class="role-title receive">Receive</h2>
+function goStage() { $("pick").classList.add("hidden"); $("send-setup").classList.add("hidden");
+                     $("recv-setup").classList.add("hidden"); $("stage").classList.remove("hidden"); }
+function goSuccess(title, note) {
+  stopAll();
+  $("stage").classList.add("hidden");
+  $("success").classList.remove("hidden");
+  $("success-title").textContent = title;
+  $("success-note").textContent = note;
+}
+$("btn-reset").onclick = () => location.reload();
+$("btn-again").onclick = () => location.reload();
+$("btn-back1").onclick = () => location.reload();
+$("btn-back2").onclick = () => location.reload();
 
-    <p class="hint" id="recv-step-hint">Step 1 — point the camera at the sender's session code. No passphrase needed yet.</p>
-    <button id="btn-start-scan" class="btn-primary">Scan session code</button>
+// ═══════════════════════════════ SENDER ═════════════════════════════════════
+const MAX_FILE_BYTES = 1048576; // 1 MB
+$("btn-send").onclick = () => { $("pick").classList.add("hidden"); $("send-setup").classList.remove("hidden"); };
+$("file").onchange = () => {
+  const f = $("file").files[0];
+  if (f && f.size > MAX_FILE_BYTES) {
+    $("file-label").textContent = `${f.name} is ${fmtB(f.size)} — too big. Max is 1 MB.`;
+    $("file").value = "";
+    $("btn-start-send").disabled = true;
+    return;
+  }
+  $("file-label").textContent = f ? `${f.name} — ${fmtB(f.size)} ✓` : "Tap to choose a file (max 1 MB)";
+  $("btn-start-send").disabled = !f;
+};
 
-    <div id="recv-live" class="hidden">
-      <div class="cam-wrap">
-        <video id="recv-video" playsinline muted></video>
-        <div class="viewfinder" aria-hidden="true"></div>
-        <canvas id="recv-canvas" class="hidden"></canvas>
-      </div>
+$("btn-start-send").onclick = async () => {
+  const file = $("file").files[0];
+  if (!file) return;
+  if (file.size > MAX_FILE_BYTES) { setState("wait", "File exceeds the 1 MB limit."); return; }
+  const passphrase = $("send-pass").value;
+  const targetChars = parseInt($("density").value, 10);
+  const fps = parseInt($("fps").value, 10);
+  sid = rand4();
 
-      <div id="scan-pill" class="scan-pill" role="status">
-        <span id="scan-dot" class="scan-dot"></span>
-        <span id="scan-text" class="mono">camera off</span>
-      </div>
-      <p class="hint">Hold 15–25 cm away, fill the frame with the QR, avoid glare.</p>
+  goStage();
+  setState("wait", "Encoding file…");
+  const plain = new Uint8Array(await file.arrayBuffer());
+  const sha = await sha256hex(plain); // over the ORIGINAL file — verified after decryption
 
-      <!-- Handshake result: session found → passphrase prompt -->
-      <div id="session-card" class="session-card hidden">
-        <p class="mono session-title">Session found</p>
-        <p id="recv-meta" class="mono meta"></p>
-        <label class="field">
-          <span>Passphrase <em>(the sender will tell you — it's never in a QR)</em></span>
-          <input type="password" id="recv-pass" autocomplete="off" placeholder="enter shared passphrase">
-        </label>
-        <button id="btn-begin" class="btn-primary">Start receiving</button>
-      </div>
+  let payload = plain, encFlag = "P", saltHex = "0", nonceHex = "0";
+  if (passphrase) {
+    setState("wait", "Encrypting (AES-256-GCM)…");
+    const { ct, salt, nonce } = await encryptBytes(plain, passphrase);
+    payload = ct; encFlag = "E"; saltHex = hex(salt); nonceHex = hex(nonce);
+    log(`encrypted: ${plain.length} B plain -> ${ct.length} B ciphertext`);
+  }
 
-      <div id="recv-transfer" class="hidden">
-        <div class="progress-row">
-          <div class="bar-track"><div id="recv-bar" class="bar-fill"></div></div>
-          <span id="recv-pct" class="mono">0%</span>
-          <span id="recv-count" class="mono">0 / ?</span>
-        </div>
+  // chunk budget: header "QH1.F.SSSS.IIIII." = 17 chars, +4 checksum
+  const availChars = targetChars - 21;
+  const chunkBytes = Math.floor(availChars / 3) * 2;
+  const total = Math.max(1, Math.ceil(payload.length / chunkBytes));
+  if (total > 99999) { setState("wait", "Too many frames at this density."); return; }
 
-        <div id="frame-grid" aria-label="Received frame map"></div>
+  const frames = new Array(total + 1); // [0] = manifest
+  const nameB45 = b45encode(te.encode(file.name));
+  const mBody = `${String(total).padStart(5,"0")}.${plain.length.toString(16).padStart(8,"0").toUpperCase()}.${sha}.${encFlag}.${saltHex}.${nonceHex}.${nameB45}`;
+  frames[0] = `QH1.M.${sid}.` + mBody + checksum4(mBody);
+  for (let i = 0; i < total; i++) {
+    const b45 = b45encode(payload.subarray(i * chunkBytes, (i + 1) * chunkBytes));
+    frames[i + 1] = `QH1.F.${sid}.${String(i + 1).padStart(5, "0")}.` + b45 + checksum4(b45);
+    if (i % 100 === 0) { setState("wait", `Encoding… ${i}/${total}`); await new Promise(r => setTimeout(r)); }
+  }
+  log(`prepared ${total} frames, ${chunkBytes} B/frame, ${encFlag === "E" ? "ENCRYPTED" : "plaintext"}, sha ${sha.slice(0,12)}…`);
 
-        <div class="btn-row">
-          <button id="btn-show-ack" class="btn-ghost">Show ACK now</button>
-          <button id="btn-save" class="btn-primary" disabled>Decrypt &amp; save file</button>
-        </div>
+  // SYN until READY
+  showQR(`QH1.S.${sid}`);
+  setState("wait", `Session ${sid} — receiver: choose RECEIVE and scan this. Waiting…`);
+  try { await startCamera(); } catch (e) { setState("wait", "Camera error: " + e.message); return; }
 
-        <div id="build-wrap" class="build hidden" aria-live="polite">
-          <div class="build-head">
-            <span id="build-label" class="mono">Building file…</span>
-            <span id="build-pct" class="mono">0%</span>
-          </div>
-          <div class="bar-track"><div id="build-bar" class="bar-fill build-fill"></div></div>
-        </div>
+  let missing = null;              // null = not started; Set of 1-based idx
+  let manifestNeeded = true;
+  let playlist = [], pos = 0;
 
-        <div id="ack-out-wrap" class="ack-out hidden">
-          <canvas id="ack-out"></canvas>
-          <p id="ack-out-label" class="hint"></p>
-        </div>
-      </div>
-    </div>
+  function rebuild() {
+    playlist = manifestNeeded ? [0] : [];
+    playlist = playlist.concat([...missing].sort((a, b) => a - b));
+    pos = 0;
+  }
+  function startPlaying() {
+    clearInterval(playTimer);
+    const dwell = Math.round(1000 / fps);
+    playTimer = setInterval(() => {
+      if (!playlist.length) return;
+      const idx = playlist[pos % playlist.length];
+      showQR(frames[idx]);
+      pos++;
+      const done = total - missing.size;
+      setState("good", `Sending ${sid} — frame ${idx || "manifest"} · ${done}/${total} confirmed`);
+      $("bar-wrap").classList.remove("hidden");
+      $("bar").style.width = Math.round(done / total * 100) + "%";
+      $("counts").textContent = `${done}/${total} frames confirmed · ${playlist.length} in rotation · ${fps} fps`;
+      setTimeout(blankQR, dwell - 55); // blank gap against motion blur
+    }, dwell);
+  }
 
-    <p id="recv-status" class="status" role="status"></p>
-  </section>
+  let lastAck = "";
+  scanLoop((text) => {
+    if (text === lastAck) return;
+    if (text === `QH1.A.${sid}` && missing === null) {
+      lastAck = text;
+      log("receiver READY — starting frames");
+      missing = new Set(Array.from({ length: total }, (_, i) => i + 1));
+      rebuild(); startPlaying();
+      return;
+    }
+    const done = text.match(/^QH1\.R\.([0-9A-F]{4})\.K$/);
+    if (done && done[1] === sid && missing !== null) {
+      goSuccess("FILE DELIVERED", `${file.name} · ${fmtB(plain.length)} · ${total} frames · session ${sid}`);
+      return;
+    }
+    const m = text.match(/^QH1\.R\.([0-9A-F]{4})\.M\.([\s\S]*)$/);
+    if (m && m[1] === sid && missing !== null) {
+      const body = m[2].slice(0, -4), ck = m[2].slice(-4);
+      if (checksum4(body) !== ck) return;
+      lastAck = text;
+      manifestNeeded = false; // an M-ack proves the manifest arrived
+      missing = new Set(fromRanges(body));
+      rebuild();
+      log(`ACK: ${missing.size} still missing`);
+    }
+  });
+};
 
-</main>
+// ═══════════════════════════════ RECEIVER ═══════════════════════════════════
+$("btn-receive").onclick = () => { $("pick").classList.add("hidden"); $("recv-setup").classList.remove("hidden"); };
 
-<footer>
-  <p class="mono">AES-256-GCM · PBKDF2 · Base45 · CRC32 per frame · SHA-256 whole-file · zero sockets</p>
-  <p class="mono" id="build-stamp">build v8 · TCP-sync + ZXing polyfill</p>
-</footer>
+$("btn-start-receive").onclick = async () => {
+  goStage();
+  setState("wait", "Point the camera at the QR code on the sender's screen…");
+  try { await startCamera(); } catch (e) { setState("wait", "Camera error: " + e.message); return; }
 
-<script type="module" src="js/main.js"></script>
+  let manifest = null;                 // {total, size, sha, enc, salt, nonce, name}
+  const chunks = new Map();            // idx -> Uint8Array
+  let lastAckShown = "";
+  let dupes = 0;
+
+  function updateScanCounter() {
+    $("scan-counter").textContent =
+      `scanned: ${scanCount} QR decodes · ${chunks.size} unique frames · ${dupes} duplicates`;
+  }
+
+  function currentAck() {
+    if (!manifest) return `QH1.A.${sid}`;
+    if (chunks.size === manifest.total) return `QH1.R.${sid}.K`;
+    const missing = [];
+    for (let i = 1; i <= manifest.total; i++) if (!chunks.has(i)) missing.push(i);
+    let ranges = toRanges(missing);
+    if (ranges.length > 2300) ranges = ranges.slice(0, ranges.lastIndexOf("/", 2300)); // cap payload
+    return `QH1.R.${sid}.M.` + ranges + checksum4(ranges);
+  }
+  function refreshAck(force = false) {
+    const a = currentAck();
+    if (force || a !== lastAckShown) { showQR(a); lastAckShown = a; }
+  }
+  function updateUI() {
+    if (!manifest) return;
+    const got = chunks.size;
+    $("bar-wrap").classList.remove("hidden");
+    $("bar").style.width = Math.round(got / manifest.total * 100) + "%";
+    $("counts").textContent =
+      `${got}/${manifest.total} frames · ${manifest.name} · ${fmtB(manifest.size)}` +
+      (manifest.enc === "E" ? " · 🔒 encrypted" : "");
+  }
+
+  function offerSave(out) {
+    const btn = $("btn-save");
+    btn.classList.remove("hidden");
+    btn.onclick = () => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([out]));
+      a.download = manifest.name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+  }
+
+  // Attempt decrypt (if needed) + SHA-256 verify. Called on completion and
+  // again from the retry button after a wrong passphrase.
+  async function finalize(assembled, passphrase) {
+    let out = assembled;
+    if (manifest.enc === "E") {
+      if (!passphrase) {
+        goSuccess("FILE RECEIVED — PASSPHRASE NEEDED",
+          `${manifest.name} is encrypted. Ask the sender for the passphrase and enter it below.`);
+        $("retry-wrap").classList.remove("hidden");
+        return;
+      }
+      try {
+        out = await decryptBytes(assembled, passphrase, unhex(manifest.salt), unhex(manifest.nonce));
+      } catch {
+        goSuccess("WRONG PASSPHRASE",
+          "Decryption failed — the passphrase doesn't match the sender's. Nothing was saved. Try again below.");
+        $("retry-wrap").classList.remove("hidden");
+        log("decrypt failed (GCM auth)");
+        return;
+      }
+    }
+    const sha = await sha256hex(out);
+    if (sha !== manifest.sha) {
+      goSuccess("INTEGRITY CHECK FAILED", "SHA-256 mismatch — the file is corrupt and was not saved.");
+      log(`sha mismatch: got ${sha.slice(0,12)} want ${manifest.sha.slice(0,12)}`);
+      return;
+    }
+    $("retry-wrap").classList.add("hidden");
+    goSuccess("FILE RECEIVED — VERIFIED",
+      `${manifest.name} · ${fmtB(out.length)} · SHA-256 ✓` + (manifest.enc === "E" ? " · decrypted 🔓" : ""));
+    offerSave(out);
+  }
+
+  let assembled = null;
+  async function complete() {
+    stopAll();
+    setState("good", "All frames received — assembling…");
+    let len = 0; for (const c of chunks.values()) len += c.length;
+    assembled = new Uint8Array(len);
+    let off = 0;
+    for (let i = 1; i <= manifest.total; i++) { const c = chunks.get(i); assembled.set(c, off); off += c.length; }
+    await finalize(assembled, $("recv-pass").value);
+  }
+  $("btn-retry-decrypt").onclick = async () => {
+    if (!assembled) return;
+    $("success").classList.add("hidden");
+    $("stage").classList.remove("hidden");
+    setState("wait", "Decrypting…");
+    await finalize(assembled, $("retry-pass").value);
+  };
+
+  let busy = false;
+  scanLoop(async (text) => {
+    updateScanCounter();
+    if (busy) return;
+    const syn = text.match(/^QH1\.S\.([0-9A-F]{4})$/);
+    if (syn && !sid) {
+      sid = syn[1];
+      log("joined session " + sid);
+      setState("good", `Session ${sid} joined — keep both phones facing each other. READY is on your screen.`);
+      refreshAck(true);
+      ackTimer = setInterval(() => refreshAck(), 1500); // keep ACK current
+      return;
+    }
+    if (!sid) return;
+
+    const mm = text.match(/^QH1\.M\.([0-9A-F]{4})\.([\s\S]*)$/);
+    if (mm && mm[1] === sid && manifest) { dupes++; updateScanCounter(); return; }
+    if (mm && mm[1] === sid && !manifest) {
+      const body = mm[2].slice(0, -4);
+      if (checksum4(body) !== mm[2].slice(-4)) return;
+      const f = body.split(".");
+      manifest = {
+        total: parseInt(f[0], 10),
+        size: parseInt(f[1], 16),
+        sha: f[2],
+        enc: f[3],
+        salt: f[4],
+        nonce: f[5],
+        name: td.decode(b45decode(f.slice(6).join("."))),
+      };
+      log(`manifest: ${manifest.name}, ${manifest.total} frames, ${fmtB(manifest.size)}, ${manifest.enc === "E" ? "ENCRYPTED" : "plain"}`);
+      if (manifest.enc === "E" && !$("recv-pass").value)
+        log("note: file is encrypted and no passphrase was entered — you'll be asked for it at the end");
+      setState("good", `Receiving ${manifest.name} (${manifest.total} frames)…`);
+      updateUI(); refreshAck(true);
+      return;
+    }
+
+    const df = text.match(/^QH1\.F\.([0-9A-F]{4})\.(\d{5})\.([\s\S]*)$/);
+    if (df && df[1] === sid) {
+      const idx = parseInt(df[2], 10);
+      if (chunks.has(idx)) { dupes++; updateScanCounter(); return; }
+      const b45 = df[3].slice(0, -4);
+      if (checksum4(b45) !== df[3].slice(-4)) { log(`frame ${idx}: checksum fail`); return; }
+      try { chunks.set(idx, b45decode(b45)); } catch (e) { log(`frame ${idx}: ${e.message}`); return; }
+      updateUI();
+      if (manifest && chunks.size === manifest.total) {
+        busy = true;
+        refreshAck(true); // persistent DONE on screen for the sender to see
+        setTimeout(complete, 1500);
+      }
+    }
+  });
+};
+
+log("page loaded · secureContext=" + window.isSecureContext);
+</script>
 </body>
 </html>

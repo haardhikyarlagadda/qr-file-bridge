@@ -1,124 +1,55 @@
 # QR File Bridge
 
-Transfer files between any two devices using **only a screen and a camera**.
+Transfer a file between two phones using **only screens and cameras**.
+No network, no Bluetooth, no cables — both devices can be in airplane mode.
 
-The file is compressed, encrypted with AES-256-GCM, cut into chunks, and played
-as an **animated QR code sequence** on the sender's screen. The receiver's
-camera decodes the frames — in any order — and rebuilds, decrypts, verifies,
-and saves the file. No Wi-Fi, no Bluetooth, no NFC, no cables, no servers,
-no accounts. Both devices can be in **airplane mode**.
+Built incrementally, each step verified on real devices before the next:
 
-Implements SRS v2.0 (QR-only optical transfer architecture).
+1. ✅ 3-way optical handshake (SYN / SYN-ACK / ACK)
+2. ✅ Capacity ladder — target devices passed at **3300 chars/frame** (QR v40-class)
+3. ✅ **File transfer** (this page) — chunked frames, live ACK screen, retransmit, SHA-256 verify
+4. ⏳ AES-256-GCM encryption (port from `legacy/js/crypto.js`, already protocol-tested)
 
-## Quick start
+## How a transfer works
 
-This is a static web app — no build step, no dependencies to install.
+Both phones open the page and face each other ~15–25 cm apart. Each screen
+talks to the other phone's camera — full duplex, no mode switching:
 
-```bash
-# any static server works; camera access needs localhost or HTTPS
-python3 -m http.server 8000
-# then open http://localhost:8000 on both devices
-```
+- **Sender screen**: plays data frames as an animated QR sequence
+- **Receiver screen**: always shows its current ACK (missing-frame ranges),
+  refreshed live; the sender's camera reads it and keeps only missing
+  frames in rotation
+- Completion: receiver shows a persistent DONE code; sender stops;
+  receiver verifies SHA-256 and offers the file for saving. A corrupt
+  transfer saves nothing.
 
-Or deploy the folder as-is to GitHub Pages, Netlify, Cloudflare Pages, or any
-static host. After the first load, the service worker caches everything and
-the app runs **fully offline** (installable as a PWA).
-
-## How to transfer a file
-
-1. **Both devices**: open the app. Agree on a passphrase out loud (never put
-   it in a QR).
-2. **Sender**: choose *Send*, pick the file, enter the passphrase, tap
-   **Encrypt & start transmitting**. The screen begins looping QR frames.
-3. **Receiver**: choose *Receive*, enter the same passphrase, tap **Open
-   camera & scan**, and aim at the sender's screen. The frame map fills in
-   live; frames arrive in any order and duplicates are ignored.
-4. **Missing frames?** Receiver taps **Show ACK QR to sender**; sender taps
-   **Scan receiver's ACK**. The sender then replays *only* the missing frames.
-5. When complete, the receiver taps **Decrypt & save file**. The file is
-   saved only if AES-GCM authentication *and* the whole-file SHA-256 both
-   verify. A wrong passphrase saves nothing.
-
-## Wire format
-
-Every QR frame is a Base45-encoded binary frame:
-
-| Field | Size | Notes |
-|---|---|---|
-| magic | 1 B | `0x51` data · `0x41` ACK |
-| sessionId | 4 B | random per transfer |
-| frameIndex | 3 B | `0` = manifest |
-| totalFrames | 3 B | data-frame count |
-| crc32 | 4 B | per-frame integrity |
-| payload | ≤ chunk size | ciphertext chunk, or JSON manifest/ACK |
-
-Frame 0 (manifest) carries: filename, sizes, frame count, chunk size,
-compression algo, PBKDF2 salt, AES-GCM nonce, and the SHA-256 of the
-original file.
-
-**Crypto:** PBKDF2-SHA-256 (100k iterations) → AES-256-GCM. The optical
-channel only ever carries ciphertext. Base45 keeps QR codes in alphanumeric
-mode (~45% denser than Base64 byte mode).
-
-## Project layout
+## Wire protocol (QR alphanumeric charset, '.'-delimited header)
 
 ```
-index.html            app shell (Send / Receive)
-css/style.css         instrument-panel UI
-js/base45.js          Base45 codec (draft-faltstrom-base45)
-js/crypto.js          PBKDF2, AES-256-GCM, SHA-256, deflate
-js/frame.js           wire format, CRC32, manifest, ACK codec
-js/sender.js          encode pipeline, QR pre-render, animated playback, ACK scan
-js/receiver.js        camera scan loop, buffering, ACK render, reassembly
-sw.js                 service worker — full offline after first load
-manifest.webmanifest  PWA install manifest
+SYN       QH1.S.<sid>
+READY     QH1.A.<sid>
+MANIFEST  QH1.M.<sid>.<total5>.<size8hex>.<sha64>.<nameB45><CK4>
+DATA      QH1.F.<sid>.<idx5>.<base45><CK4>
+ACK       QH1.R.<sid>.M.<ranges e.g. 1-40/55/71-90><CK4>
+DONE      QH1.R.<sid>.K
 ```
 
-Runtime libraries (loaded from cdnjs, cached offline by the service worker):
-[qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) (encode)
-and [jsQR](https://github.com/cozmo/jsQR) (decode).
+Every frame carries a 4-hex checksum; the whole file is verified against
+the SHA-256 in the manifest. Base45 keeps QR codes in alphanumeric mode
+(~45% denser than Base64 byte mode).
 
-## Tuning
+Density options: 550 / 1100 / 2000 (default) / 2600 chars per frame
+(≈355 / 719 / 1318 / 1719 bytes of file data per frame).
 
-| Setting | Trade-off |
-|---|---|
-| Chunk size 200–1200 B | bigger = fewer frames but denser QR = harder to scan |
-| Frame rate 1–6 fps | faster = quicker transfer but more missed frames |
+## Run
 
-Defaults (400 B @ 2 fps) work across typical phone cameras at 20–40 cm.
-Throughput is inherently modest (~50–500 KB/min depending on settings) — this
-is a tool for documents, photos, keys, and configs across an air gap, not for
-videos.
+Serve `index.html` over HTTPS (camera requirement) — GitHub Pages,
+Netlify Drop, Cloudflare Pages all work. One file, no build step.
+The protocol simulation (`40 assertions`) runs the exact page logic in
+Node including a 10% frame-drop + ACK + retransmit cycle.
 
-## Browser support
-
-Chrome/Edge/Firefox/Safari (recent versions). Requires: `getUserMedia`,
-Web Crypto, ES modules. `CompressionStream` is used when available and
-skipped gracefully when not. Camera access requires HTTPS or localhost.
-
-## Testing without two devices
-
-Open the app in two browser windows on one machine: *Send* in one, *Receive*
-in the other, and point a phone camera… no — simpler: use one laptop as
-sender and one phone as receiver, or two phones. A single device can't scan
-its own screen.
+Previous full implementation and diagnostics live in `legacy/`.
 
 ## License
 
 MIT
-
-## Troubleshooting
-
-**"undefined is not an object (evaluating 'navigator.mediaDevices.getUserMedia')"**
-(iPhone/Safari) — the page was loaded over plain `http://`. Browsers expose
-the camera API only in a *secure context*: an `https://` URL or `localhost`.
-Accessing your dev machine over LAN IP (`http://192.168.x.x:8000`) is **not**
-secure. Fix: deploy to any HTTPS host (GitHub Pages works out of the box) or
-tunnel your local server through HTTPS (`ngrok http 8000`, Cloudflare Tunnel).
-The app now detects this and shows a banner instead of failing cryptically.
-
-**Camera permission denied** — allow camera access for the site in
-Settings → Safari (iOS) or the address-bar permissions (desktop), then retry.
-
-**Frames scan slowly on iPhone** — lower the sender frame rate to 1–2 fps
-and use the 200–400 B chunk sizes; Safari throttles camera processing.
