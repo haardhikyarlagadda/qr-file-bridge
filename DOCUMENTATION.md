@@ -24,7 +24,7 @@ layer below it is verified on the actual devices.**
 | 1. Handshake | The optical channel works in both directions | ✅ verified on-device |
 | 2. Capacity ladder | The real QR density limit of the device pair | ✅ passed at 3300 chars |
 | 3. File transfer | Chunking, ACK/retransmit, integrity | ✅ built on 1+2 |
-| 4. Encryption | AES-256-GCM over the proven channel | ⏳ next |
+| 4. Encryption | AES-256-GCM over the proven channel | ✅ done |
 
 The entire application is **one HTML file** (`index.html`) with no build
 step, no modules, and no service worker. Every architectural simplification
@@ -159,7 +159,7 @@ positional field.
 ```
 SYN       QH1.S.<sid>
 READY     QH1.A.<sid>
-MANIFEST  QH1.M.<sid>.<total5>.<size8hex>.<sha64>.<nameB45><CK4>
+MANIFEST  QH1.M.<sid>.<total5>.<size8hex>.<sha64>.<P|E>.<salt>.<nonce>.<nameB45><CK4>
 DATA      QH1.F.<sid>.<idx5>.<base45><CK4>          idx is 1-based, 5 digits
 ACK       QH1.R.<sid>.M.<ranges><CK4>               e.g. 1-40/55/71-90
 DONE      QH1.R.<sid>.K
@@ -172,11 +172,13 @@ Details worth noting:
   ranges: at transfer start, "everything missing" is just `1-497`.
 - **The filename is Base45-encoded UTF-8**, so unicode names (and names
   containing dots) survive; the parser reads header fields positionally and
-  treats everything after the fourth dot as the name field.
+  treats everything after the seventh dot as the name field. Encrypted
+  transfers send an empty name field; the real name is sealed inside the
+  ciphertext as `nameLen(2 bytes) | name | file`.
 - **Two integrity layers:** every frame carries a 4-hex checksum (`CK4`,
   a 16-bit polynomial hash) that rejects corrupted scans on the spot, and
-  the manifest carries the SHA-256 of the whole file, verified before the
-  receiver offers the file for saving. A corrupt transfer saves nothing.
+  the manifest carries the SHA-256 of the transferred bytes (the ciphertext
+  when encrypted), verified before the receiver offers the file for saving. A corrupt transfer saves nothing.
 
 ### The sender pipeline
 
@@ -186,7 +188,8 @@ sha    = SHA-256(bytes)                        // via crypto.subtle
 // chunk budget: header "QH1.F.SSSS.IIIII." = 17 chars + 4 checksum = 21
 availChars = targetChars - 21
 chunkBytes = floor(availChars / 3) * 2         // Base45: 2 bytes → 3 chars
-frames[0]  = manifest(total, size, sha, base45(name))
+// encrypted: payload = AES-GCM(nameLen | name | bytes), name field empty
+frames[0]  = manifest(total, size(payload), SHA-256(payload), P|E, salt, nonce, base45(name))
 frames[i]  = "QH1.F." + sid + "." + idx5 + "." + base45(chunk_i) + CK4
 ```
 
@@ -312,14 +315,16 @@ same-machine development only.
 
 **Security (current state)**
 
-- Frames currently carry **plaintext** (Base45 is an encoding, not
-  encryption). Anyone who can film the sender's screen can reconstruct the
-  file. Integrity is protected (per-frame checksum + whole-file SHA-256),
-  confidentiality is not yet.
-- Step 4 ports the already protocol-tested AES-256-GCM + PBKDF2 layer from
-  `legacy/js/crypto.js`, restoring the original security model: encrypt
-  before chunking, so the optical channel only ever carries ciphertext and
-  the shared passphrase never appears in any QR.
+- **Without a passphrase, frames carry plaintext** (Base45 is an encoding,
+  not encryption). Anyone who can film the sender's screen can reconstruct
+  the file.
+- **With a passphrase**, the file is encrypted with AES-256-GCM (key from
+  PBKDF2-SHA256, 600,000 iterations, random salt) before chunking. The
+  filename is sealed inside the ciphertext, and the manifest's hash and size
+  describe the ciphertext only, so someone filming the screen can't read
+  the name or confirm a guessed file. The passphrase never appears in any
+  QR. Someone who films the whole transfer can still try to guess the
+  passphrase offline, so use a long one.
 
 ---
 

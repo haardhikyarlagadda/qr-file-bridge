@@ -134,6 +134,7 @@
   <div class="big">✅</div>
   <div id="success-title"></div>
   <p class="sub mono" id="success-note" style="margin-top:6px"></p>
+  <p class="sub hidden" id="done-hint" style="margin-top:6px">Keep this code facing the sender's camera until their screen says FILE DELIVERED.</p>
   <div id="retry-wrap" class="hidden" style="text-align:left">
     <label>Passphrase
       <input type="password" id="retry-pass" autocomplete="off" placeholder="enter the sender's passphrase">
@@ -224,7 +225,7 @@ async function deriveKey(passphrase, salt) {
   const material = await crypto.subtle.importKey(
     "raw", new TextEncoder().encode(passphrase), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+    { name: "PBKDF2", salt, iterations: 600000, hash: "SHA-256" },  // OWASP 2023 figure for SHA-256
     material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 }
 async function encryptBytes(plain, passphrase) {
@@ -238,6 +239,22 @@ async function decryptBytes(ct, passphrase, salt, nonce) {
   const key = await deriveKey(passphrase, salt);
   // throws on wrong passphrase / tampering (GCM auth tag)
   return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, key, ct));
+}
+// Encrypted transfers seal the filename together with the file:
+//   plaintext = nameLen (2 bytes, big-endian) | name (UTF-8) | file bytes
+// so the name never appears in a QR code.
+function packNamed(name, bytes) {
+  const n = new TextEncoder().encode(name).subarray(0, 65535);
+  const out = new Uint8Array(2 + n.length + bytes.length);
+  out[0] = n.length >> 8; out[1] = n.length & 0xff;
+  out.set(n, 2); out.set(bytes, 2 + n.length);
+  return out;
+}
+function unpackNamed(buf) {
+  if (buf.length < 2) throw new Error("payload too short");
+  const len = (buf[0] << 8) | buf[1];
+  if (2 + len > buf.length) throw new Error("bad name length");
+  return { name: new TextDecoder().decode(buf.subarray(2, 2 + len)), bytes: buf.subarray(2 + len) };
 }
 // ranges: "1-40/55/71-90" ('/' and '-' are QR-alphanumeric; ',' is not)
 function toRanges(sorted) {
@@ -307,13 +324,17 @@ function blankQR() {
 
 // ── Camera + scan loop ───────────────────────────────────────────────────────
 let stream = null, scanning = false, facing = "environment";
+let session = 0;   // bumped by resetToPick(); async work from an older session bails out
 async function startCamera() {
   if (stream) return;
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("camera API unavailable");
-  stream = await navigator.mediaDevices.getUserMedia({
+  const my = session;
+  const s = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } },
     audio: false,
   });
+  if (my !== session) { s.getTracks().forEach(t => t.stop()); throw new Error("cancelled"); }
+  stream = s;
   const v = $("cam");
   v.srcObject = stream;
   v.classList.remove("hidden");
@@ -339,13 +360,16 @@ function stopAll() {
   clearInterval(playTimer); clearInterval(ackTimer);
 }
 let scanCount = 0;      // every QR successfully decoded, duplicates included
+let scanGen = 0;        // each scanLoop gets a generation; older loops stop themselves
 async function scanLoop(onText) {
+  const gen = ++scanGen;
   await decoderReady;
+  if (gen !== scanGen) return;
   scanning = true;
   const v = $("cam"), work = $("work");
   const ctx = work.getContext("2d", { willReadFrequently: true });
   const tick = async () => {
-    if (!scanning) return;
+    if (!scanning || gen !== scanGen) return;
     if (v.readyState === v.HAVE_ENOUGH_DATA) {
       work.width = v.videoWidth; work.height = v.videoHeight;
       ctx.drawImage(v, 0, 0);
@@ -361,7 +385,7 @@ async function scanLoop(onText) {
         const c = jsQR(img.data, work.width, work.height, { inversionAttempts: "dontInvert" });
         if (c) text = c.data;
       }
-      if (text !== null) { scanCount++; onText(text); }
+      if (text !== null && gen === scanGen) { scanCount++; onText(text); }
     }
     setTimeout(tick, 100);
   };
@@ -375,17 +399,41 @@ const te = new TextEncoder(), td = new TextDecoder();
 
 function goStage() { $("pick").classList.add("hidden"); $("send-setup").classList.add("hidden");
                      $("recv-setup").classList.add("hidden"); $("stage").classList.remove("hidden"); }
-function goSuccess(title, note) {
+// keepQR: the receiver keeps its DONE code on the success screen, so a sender
+// that hasn't seen it yet still can.
+function goSuccess(title, note, keepQR = false) {
   stopAll();
   $("stage").classList.add("hidden");
   $("success").classList.remove("hidden");
   $("success-title").textContent = title;
   $("success-note").textContent = note;
+  if (keepQR) {
+    $("success").insertBefore($("qr-box"), $("done-hint"));
+    $("done-hint").classList.remove("hidden");
+  }
 }
-$("btn-reset").onclick = () => location.reload();
-$("btn-again").onclick = () => location.reload();
-$("btn-back1").onclick = () => location.reload();
-$("btn-back2").onclick = () => location.reload();
+// Reset in place instead of location.reload(): the page has no service
+// worker, so a reload in airplane mode would load nothing.
+function resetToPick() {
+  session++;
+  stopAll();
+  sid = null; scanCount = 0; facing = "environment";
+  $("stage").insertBefore($("qr-box"), $("cam"));
+  blankQR();
+  for (const id of ["send-setup", "recv-setup", "stage", "success", "qr-box", "cam",
+                    "bar-wrap", "retry-wrap", "btn-save", "done-hint"])
+    $(id).classList.add("hidden");
+  $("pick").classList.remove("hidden");
+  for (const id of ["file", "send-pass", "recv-pass", "retry-pass"]) $(id).value = "";
+  for (const id of ["counts", "scan-counter", "success-title", "success-note", "log"]) $(id).textContent = "";
+  $("file-label").textContent = "Tap to choose a file (max 1 MB)";
+  $("btn-start-send").disabled = true;
+  $("btn-save").onclick = null;
+  $("btn-retry-decrypt").onclick = null;
+  $("bar").style.width = "0%";
+  setState("wait", "…");
+}
+for (const id of ["btn-reset", "btn-again", "btn-back1", "btn-back2"]) $(id).onclick = resetToPick;
 
 // ═══════════════════════════════ SENDER ═════════════════════════════════════
 const MAX_FILE_BYTES = 1048576; // 1 MB
@@ -409,20 +457,26 @@ $("btn-start-send").onclick = async () => {
   const passphrase = $("send-pass").value;
   const targetChars = parseInt($("density").value, 10);
   const fps = parseInt($("fps").value, 10);
+  const my = session;
   sid = rand4();
 
   goStage();
   setState("wait", "Encoding file…");
   const plain = new Uint8Array(await file.arrayBuffer());
-  const sha = await sha256hex(plain); // over the ORIGINAL file — verified after decryption
 
-  let payload = plain, encFlag = "P", saltHex = "0", nonceHex = "0";
+  // The manifest hash always covers the bytes that travel. For encrypted
+  // transfers that is the ciphertext: a plaintext hash would let anyone who
+  // films the screen confirm a guessed file without the passphrase.
+  let payload = plain, encFlag = "P", saltHex = "0", nonceHex = "0", wireName = file.name;
   if (passphrase) {
     setState("wait", "Encrypting (AES-256-GCM)…");
-    const { ct, salt, nonce } = await encryptBytes(plain, passphrase);
+    const { ct, salt, nonce } = await encryptBytes(packNamed(file.name, plain), passphrase);
     payload = ct; encFlag = "E"; saltHex = hex(salt); nonceHex = hex(nonce);
+    wireName = "";   // the name travels inside the ciphertext
     log(`encrypted: ${plain.length} B plain -> ${ct.length} B ciphertext`);
   }
+  const sha = await sha256hex(payload);
+  if (my !== session) return;
 
   // chunk budget: header "QH1.F.SSSS.IIIII." = 17 chars, +4 checksum
   const availChars = targetChars - 21;
@@ -431,20 +485,25 @@ $("btn-start-send").onclick = async () => {
   if (total > 99999) { setState("wait", "Too many frames at this density."); return; }
 
   const frames = new Array(total + 1); // [0] = manifest
-  const nameB45 = b45encode(te.encode(file.name));
-  const mBody = `${String(total).padStart(5,"0")}.${plain.length.toString(16).padStart(8,"0").toUpperCase()}.${sha}.${encFlag}.${saltHex}.${nonceHex}.${nameB45}`;
+  const nameB45 = b45encode(te.encode(wireName));
+  const mBody = `${String(total).padStart(5,"0")}.${payload.length.toString(16).padStart(8,"0").toUpperCase()}.${sha}.${encFlag}.${saltHex}.${nonceHex}.${nameB45}`;
   frames[0] = `QH1.M.${sid}.` + mBody + checksum4(mBody);
   for (let i = 0; i < total; i++) {
     const b45 = b45encode(payload.subarray(i * chunkBytes, (i + 1) * chunkBytes));
     frames[i + 1] = `QH1.F.${sid}.${String(i + 1).padStart(5, "0")}.` + b45 + checksum4(b45);
-    if (i % 100 === 0) { setState("wait", `Encoding… ${i}/${total}`); await new Promise(r => setTimeout(r)); }
+    if (i % 100 === 0) {
+      setState("wait", `Encoding… ${i}/${total}`);
+      await new Promise(r => setTimeout(r));
+      if (my !== session) return;
+    }
   }
   log(`prepared ${total} frames, ${chunkBytes} B/frame, ${encFlag === "E" ? "ENCRYPTED" : "plaintext"}, sha ${sha.slice(0,12)}…`);
 
   // SYN until READY
   showQR(`QH1.S.${sid}`);
   setState("wait", `Session ${sid} — receiver: choose RECEIVE and scan this. Waiting…`);
-  try { await startCamera(); } catch (e) { setState("wait", "Camera error: " + e.message); return; }
+  try { await startCamera(); }
+  catch (e) { if (my === session) setState("wait", "Camera error: " + e.message); return; }
 
   let missing = null;              // null = not started; Set of 1-based idx
   let manifestNeeded = true;
@@ -504,11 +563,13 @@ $("btn-start-send").onclick = async () => {
 $("btn-receive").onclick = () => { $("pick").classList.add("hidden"); $("recv-setup").classList.remove("hidden"); };
 
 $("btn-start-receive").onclick = async () => {
+  const my = session;
   goStage();
   setState("wait", "Point the camera at the QR code on the sender's screen…");
-  try { await startCamera(); } catch (e) { setState("wait", "Camera error: " + e.message); return; }
+  try { await startCamera(); }
+  catch (e) { if (my === session) setState("wait", "Camera error: " + e.message); return; }
 
-  let manifest = null;                 // {total, size, sha, enc, salt, nonce, name}
+  let manifest = null;                 // {total, size, sha, enc, salt, nonce, name, label}
   const chunks = new Map();            // idx -> Uint8Array
   let lastAckShown = "";
   let dupes = 0;
@@ -518,9 +579,14 @@ $("btn-start-receive").onclick = async () => {
       `scanned: ${scanCount} QR decodes · ${chunks.size} unique frames · ${dupes} duplicates`;
   }
 
+  function haveAll() {
+    if (!manifest) return false;
+    for (let i = 1; i <= manifest.total; i++) if (!chunks.has(i)) return false;
+    return true;
+  }
   function currentAck() {
     if (!manifest) return `QH1.A.${sid}`;
-    if (chunks.size === manifest.total) return `QH1.R.${sid}.K`;
+    if (haveAll()) return `QH1.R.${sid}.K`;
     const missing = [];
     for (let i = 1; i <= manifest.total; i++) if (!chunks.has(i)) missing.push(i);
     let ranges = toRanges(missing);
@@ -537,57 +603,66 @@ $("btn-start-receive").onclick = async () => {
     $("bar-wrap").classList.remove("hidden");
     $("bar").style.width = Math.round(got / manifest.total * 100) + "%";
     $("counts").textContent =
-      `${got}/${manifest.total} frames · ${manifest.name} · ${fmtB(manifest.size)}` +
+      `${got}/${manifest.total} frames · ${manifest.label} · ${fmtB(manifest.size)}` +
       (manifest.enc === "E" ? " · 🔒 encrypted" : "");
   }
 
-  function offerSave(out) {
+  function offerSave(out, name) {
     const btn = $("btn-save");
     btn.classList.remove("hidden");
     btn.onclick = () => {
+      const url = URL.createObjectURL(new Blob([out]));
       const a = document.createElement("a");
-      a.href = URL.createObjectURL(new Blob([out]));
-      a.download = manifest.name;
+      a.href = url;
+      a.download = name || "received-file";
       a.click();
-      URL.revokeObjectURL(a.href);
+      // iOS Safari starts the download asynchronously; revoking right away cancels it
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
     };
   }
 
-  // Attempt decrypt (if needed) + SHA-256 verify. Called on completion and
-  // again from the retry button after a wrong passphrase.
+  // SHA-256 verify of the received bytes, then decrypt if needed. Called on
+  // completion and again from the retry button after a wrong passphrase.
+  // Every outcome keeps the DONE code on screen for the sender.
   async function finalize(assembled, passphrase) {
-    let out = assembled;
+    const sha = await sha256hex(assembled);
+    if (my !== session) return;
+    if (sha !== manifest.sha) {
+      goSuccess("INTEGRITY CHECK FAILED", "SHA-256 mismatch — the file is corrupt and was not saved.", true);
+      log(`sha mismatch: got ${sha.slice(0,12)} want ${manifest.sha.slice(0,12)}`);
+      return;
+    }
+    let out = assembled, name = manifest.name;
     if (manifest.enc === "E") {
       if (!passphrase) {
         goSuccess("FILE RECEIVED — PASSPHRASE NEEDED",
-          `${manifest.name} is encrypted. Ask the sender for the passphrase and enter it below.`);
+          "The file is encrypted. Ask the sender for the passphrase and enter it below.", true);
         $("retry-wrap").classList.remove("hidden");
         return;
       }
       try {
-        out = await decryptBytes(assembled, passphrase, unhex(manifest.salt), unhex(manifest.nonce));
+        const inner = unpackNamed(
+          await decryptBytes(assembled, passphrase, unhex(manifest.salt), unhex(manifest.nonce)));
+        out = inner.bytes; name = inner.name;
       } catch {
+        if (my !== session) return;
         goSuccess("WRONG PASSPHRASE",
-          "Decryption failed — the passphrase doesn't match the sender's. Nothing was saved. Try again below.");
+          "Decryption failed — the passphrase doesn't match the sender's. Nothing was saved. Try again below.", true);
         $("retry-wrap").classList.remove("hidden");
         log("decrypt failed (GCM auth)");
         return;
       }
-    }
-    const sha = await sha256hex(out);
-    if (sha !== manifest.sha) {
-      goSuccess("INTEGRITY CHECK FAILED", "SHA-256 mismatch — the file is corrupt and was not saved.");
-      log(`sha mismatch: got ${sha.slice(0,12)} want ${manifest.sha.slice(0,12)}`);
-      return;
+      if (my !== session) return;
     }
     $("retry-wrap").classList.add("hidden");
     goSuccess("FILE RECEIVED — VERIFIED",
-      `${manifest.name} · ${fmtB(out.length)} · SHA-256 ✓` + (manifest.enc === "E" ? " · decrypted 🔓" : ""));
-    offerSave(out);
+      `${name} · ${fmtB(out.length)} · SHA-256 ✓` + (manifest.enc === "E" ? " · decrypted 🔓" : ""), true);
+    offerSave(out, name);
   }
 
   let assembled = null;
   async function complete() {
+    if (my !== session) return;
     stopAll();
     setState("good", "All frames received — assembling…");
     let len = 0; for (const c of chunks.values()) len += c.length;
@@ -605,6 +680,15 @@ $("btn-start-receive").onclick = async () => {
   };
 
   let busy = false;
+  // Checked after both data frames AND the manifest: frames can all land
+  // before the manifest is first decoded, and then the manifest completes it.
+  function maybeComplete() {
+    if (busy || !haveAll()) return;
+    busy = true;
+    refreshAck(true); // DONE on screen for the sender to see
+    setTimeout(complete, 1500);
+  }
+
   scanLoop(async (text) => {
     updateScanCounter();
     if (busy) return;
@@ -625,6 +709,12 @@ $("btn-start-receive").onclick = async () => {
       const body = mm[2].slice(0, -4);
       if (checksum4(body) !== mm[2].slice(-4)) return;
       const f = body.split(".");
+      if (f[3] !== "P" && f[3] !== "E") {
+        setState("wait", "Unsupported transfer format — open the same version of this page on both phones.");
+        log(`manifest: unknown encryption flag "${f[3]}"`);
+        return;
+      }
+      const name = td.decode(b45decode(f.slice(6).join(".")));
       manifest = {
         total: parseInt(f[0], 10),
         size: parseInt(f[1], 16),
@@ -632,29 +722,28 @@ $("btn-start-receive").onclick = async () => {
         enc: f[3],
         salt: f[4],
         nonce: f[5],
-        name: td.decode(b45decode(f.slice(6).join("."))),
+        name,                                   // empty for encrypted transfers
+        label: f[3] === "E" ? "encrypted file" : name,
       };
-      log(`manifest: ${manifest.name}, ${manifest.total} frames, ${fmtB(manifest.size)}, ${manifest.enc === "E" ? "ENCRYPTED" : "plain"}`);
+      log(`manifest: ${manifest.label}, ${manifest.total} frames, ${fmtB(manifest.size)}, ${manifest.enc === "E" ? "ENCRYPTED" : "plain"}`);
       if (manifest.enc === "E" && !$("recv-pass").value)
         log("note: file is encrypted and no passphrase was entered — you'll be asked for it at the end");
-      setState("good", `Receiving ${manifest.name} (${manifest.total} frames)…`);
+      setState("good", `Receiving ${manifest.label} (${manifest.total} frames)…`);
       updateUI(); refreshAck(true);
+      maybeComplete();
       return;
     }
 
     const df = text.match(/^QH1\.F\.([0-9A-F]{4})\.(\d{5})\.([\s\S]*)$/);
     if (df && df[1] === sid) {
       const idx = parseInt(df[2], 10);
+      if (idx < 1 || (manifest && idx > manifest.total)) return;
       if (chunks.has(idx)) { dupes++; updateScanCounter(); return; }
       const b45 = df[3].slice(0, -4);
       if (checksum4(b45) !== df[3].slice(-4)) { log(`frame ${idx}: checksum fail`); return; }
       try { chunks.set(idx, b45decode(b45)); } catch (e) { log(`frame ${idx}: ${e.message}`); return; }
       updateUI();
-      if (manifest && chunks.size === manifest.total) {
-        busy = true;
-        refreshAck(true); // persistent DONE on screen for the sender to see
-        setTimeout(complete, 1500);
-      }
+      maybeComplete();
     }
   });
 };
