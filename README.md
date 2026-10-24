@@ -8,7 +8,7 @@ Built incrementally, each step verified on real devices before the next:
 1. ✅ 3-way optical handshake (SYN / SYN-ACK / ACK)
 2. ✅ Capacity ladder — target devices passed at **3300 chars/frame** (QR v40-class)
 3. ✅ **File transfer** (this page) — chunked frames, live ACK screen, retransmit, SHA-256 verify
-4. ⏳ AES-256-GCM encryption (port from `legacy/js/crypto.js`, already protocol-tested)
+4. ✅ Optional AES-256-GCM encryption (PBKDF2-SHA256, 600k iterations) — filename sealed inside the ciphertext
 
 ## How a transfer works
 
@@ -28,14 +28,16 @@ talks to the other phone's camera — full duplex, no mode switching:
 ```
 SYN       QH1.S.<sid>
 READY     QH1.A.<sid>
-MANIFEST  QH1.M.<sid>.<total5>.<size8hex>.<sha64>.<nameB45><CK4>
+MANIFEST  QH1.M.<sid>.<total5>.<size8hex>.<sha64>.<P|E>.<salt>.<nonce>.<nameB45><CK4>
 DATA      QH1.F.<sid>.<idx5>.<base45><CK4>
 ACK       QH1.R.<sid>.M.<ranges e.g. 1-40/55/71-90><CK4>
 DONE      QH1.R.<sid>.K
 ```
 
-Every frame carries a 4-hex checksum; the whole file is verified against
-the SHA-256 in the manifest. Base45 keeps QR codes in alphanumeric mode
+Every frame carries a 4-hex checksum; the received bytes are verified against
+the SHA-256 in the manifest. For encrypted transfers (`E`) that hash, the size
+and the name field cover the ciphertext only — the real filename travels
+inside the encrypted payload, so nothing about the file is readable from the QR codes. Base45 keeps QR codes in alphanumeric mode
 (~45% denser than Base64 byte mode).
 
 Density options: 550 / 1100 / 2000 (default) / 2600 chars per frame
